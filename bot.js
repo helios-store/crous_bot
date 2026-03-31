@@ -139,7 +139,7 @@ const commands = {
         { name: '📑 Études', value: '`!pubmed` — Affiche la dernière étude\n`!def-etude <titre> | <url> | <description>` *(admin)*', inline: false },
         { name: '💊 Compléments', value: '`!cope` — Liste des compléments\n`!add-cope <nom>` *(admin)*\n`!add-interesting <nom>` *(admin)*\n`!remove-cope <nom>` *(admin)*\n`!remove-interesting <nom>` *(admin)*', inline: false },
         { name: '📜 Règles', value: '`!regles` — Toutes les règles\n`!regle<N>` — Règle numéro N (ex: `!regle3`)\n`!set-regle <N> | <texte>` *(admin)*', inline: false },
-        { name: '🔨 Modération', value: '`!ban <@user> [raison]` *(Permissions Ban)*', inline: false },
+        { name: '🔨 Modération', value: '`!ban <@user> [raison]` *(Permissions Ban)*\n`!source` — Mute auto 10min + CF règle 1\n`!mk677` — Kick auto', inline: false },
         { name: '🔴 Live', value: 'Détection auto des lives TikTok', inline: false },
       )
       .setFooter({ text: '*(admin) = Réservé aux utilisateurs autorisés' });
@@ -266,6 +266,34 @@ const commands = {
     rulesData[num] = parts[1];
     saveJSON(FILES.rules, rulesData);
     await message.reply(`✅ Règle **${num}** mise à jour.`);
+  },
+ 
+  // --- SOURCE (mute instantané sauf admins) ---
+  '!source': async (message) => {
+    if (isAdmin(message.author.id)) return; // Les admins sont immunisés
+    try {
+      await message.member.timeout(10 * 60 * 1000, 'Utilisation de !source — CF : règle 1.');
+      const e = embed('#FFA500')
+        .setTitle('🔇 Mute automatique')
+        .setDescription(`<@${message.author.id}> a été muté pendant 10 minutes.\n\n**CF : règle 1.**`);
+      await message.reply({ embeds: [e] });
+    } catch (err) {
+      await message.reply(`❌ Impossible de muter : ${err.message}`);
+    }
+  },
+ 
+  // --- MK677 (kick instantané sauf admins) ---
+  '!mk677': async (message) => {
+    if (isAdmin(message.author.id)) return; // Les admins sont immunisés
+    try {
+      const e = embed('#FF4444')
+        .setTitle('👢 Kick automatique')
+        .setDescription(`<@${message.author.id}> a été kické pour avoir mentionné le MK-677.`);
+      await message.reply({ embeds: [e] });
+      await message.member.kick('Utilisation de !mk677');
+    } catch (err) {
+      await message.reply(`❌ Impossible de kicker : ${err.message}`);
+    }
   },
  
   // --- BAN ---
