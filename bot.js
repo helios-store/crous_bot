@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, EmbedBuilder, PermissionsBitField, Partials } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, PermissionsBitField } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
@@ -22,22 +22,29 @@ const CONFIG = {
   TIKTOK_USERNAME: 'crousgainz',
  
   // Channel Discord où envoyer les alertes live (ID du channel)
-  LIVE_CHANNEL_ID: '1181558040131010593',  // ← Remplace par l'ID du channel
+  LIVE_CHANNEL_ID: '1473454771305185361',  // ← Remplace par l'ID du channel
  
   // Intervalle de vérification des lives TikTok (en ms) — défaut: 2 minutes
   LIVE_CHECK_INTERVAL: 2 * 60 * 1000,
  
   // Préfixe des commandes
   PREFIX: '!',
- 
+
+  // ROLE pour ticket: tout le monde du rôle peut voir, mais pas écrire (sauf staff + ouvreur).
+  TICKET_VIEW_ROLE_ID: '1487674672865611806',
+
+  // Commande !mommy-asmr autorisée uniquement pour :
+  MOMMY_ASMR_USER_ID: '1469795368580677717', '535857300552810526',
+  MOMMY_ASMR_FILE_URL: 'https://cdn.pixabay.com/download/audio/2021/08/04/audio_d6cd1baf3a.mp3',
+
   // ============================================================
   //  🎭  REACTION ROLE — À MODIFIER
   // ============================================================
   REACTION_ROLE: {
-    MESSAGE_ID: '1488290011425149022',  // ← ID du message sur lequel réagir
-    CHANNEL_ID: '1488289976540991770',  // ← ID du channel où se trouve le message
-    ROLE_ID:    '1487674672865611806',  // ← ID du rôle à donner
-    EMOJI:      '❤️',                  // ← Emoji de la réaction (ex: ✅ ou un emoji custom)
+    MESSAGE_ID: '1488586740162629823',  // ← ID du message sur lequel réagir
+    CHANNEL_ID: '1488585932713103451',  // ← ID du channel où se trouve le message
+    ROLE_ID:    '1488288795530100928',  // ← ID du rôle à donner
+    EMOJI:      '✅',                  // ← Emoji de la réaction (ex: ✅ ou un emoji custom)
   },
 };
  
@@ -94,14 +101,14 @@ let copesData = loadJSON(FILES.copes, {
 });
  
 let rulesData = loadJSON(FILES.rules, {
-  1: "Respectez tous les membres du serveur.",
-  2: "Pas de spam ni de flood.",
-  3: "Pas de contenu NSFW hors channels dédiés.",
-  4: "Pas de publicité non autorisée.",
-  5: "Respectez les décisions des modérateurs.",
-  6: "Pas de partage d'informations personnelles d'autrui.",
-  7: "Restez dans les sujets des channels.",
-  8: "Toute infraction grave entraîne un ban direct.",
+  1: "Pas de demande de source : Il est interdit de demander, vendre ou partager des sources de stéroïdes, peptides ou autres substances dopantes. Les discussions éducatives générales peuvent être tolérées mais aucune source ou contact ne doit être partagé.",
+  2: "Aucune discrimination : Les propos racistes, homophobes, sexistes ou discriminatoires sont strictement interdits sauf sur les iqlet. --> L’utilisation du N-word, P-word ou tout autre terme offensant est autorisé",
+  3: "Respect obligatoire : Tout le monde doit être respecté. Les insultes, provocations, harcèlement ou comportements toxiques ne sont pas tolérés sauf si la personne est sous système fluide.",
+  4: "Pas de spam : Le spam, flood, messages répétés, ou abus de majuscules sont interdits.",
+  5: "Publicité interdite : Pas de promotion de chaînes, serveurs, produits ou services sans l’autorisation du staff.",
+  6: "Contenu inapproprié : Les contenus NSFW, choquants ou illégaux sont interdits.",
+  7: "Restez dans les bons salons : Merci d’utiliser les salons appropriés pour chaque sujet.",
+  8: "Respect du staff : Les décisions du staff doivent être respectées. Si vous avez un problème on s’en fou on va pas lire.",
 });
  
 let liveStatus = loadJSON(FILES.liveStatus, { isLive: false, lastNotified: null });
@@ -118,7 +125,6 @@ const client = new Client({
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessageReactions,
   ],
- partials: [Partials.Message, Partials.Channel, Partials.Reaction],
 });
  
 // ============================================================
@@ -151,7 +157,9 @@ const commands = {
         { name: '📑 Études', value: '`!pubmed` — Affiche la dernière étude\n`!def-etude <titre> | <url> | <description>` *(admin)*', inline: false },
         { name: '💊 Compléments', value: '`!cope` — Liste des compléments\n`!add-cope <nom>` *(admin)*\n`!add-interesting <nom>` *(admin)*\n`!remove-cope <nom>` *(admin)*\n`!remove-interesting <nom>` *(admin)*', inline: false },
         { name: '📜 Règles', value: '`!regles` — Toutes les règles\n`!regle<N>` — Règle numéro N (ex: `!regle3`)\n`!set-regle <N> | <texte>` *(admin)*', inline: false },
-        { name: '🔨 Modération', value: '`!ban <@user> [raison]` *(Permissions Ban)*\n`!source` — Mute auto 10min + CF règle 1\n`!mk677` — Kick auto', inline: false },
+        { name: '🔨 Modération', value: '`!ban <@user> [raison]` *(Permissions Ban)*\n`!source` — Mute auto 10min + CF règle 1\n`!mk677` — Mute auto 10min', inline: false },
+        { name: '🎫 Tickets', value: '`!ticket <motif du rôle> | <motif de contestation>` — Ouvre un ticket privé visible par le rôle staff/config', inline: false },
+        { name: '🎵 ASMR', value: '`!mommy-asmr` — Commande réservée à l’ID propriétaire (envoi MP3)', inline: false },
         { name: '🎭 Reaction Role', value: 'Réagis au message de bienvenue pour accéder au serveur', inline: false },
         { name: '🔴 Live', value: 'Détection auto des lives TikTok', inline: false },
       )
@@ -295,31 +303,100 @@ const commands = {
     }
   },
  
-  // --- MK677 (kick instantané sauf admins) ---
+  // --- MK677 (mute 10 min plutôt que kick) ---
   '!mk677': async (message) => {
     if (isAdmin(message.author.id)) return;
     try {
+      await message.member.timeout(10 * 60 * 1000, 'Utilisation de !mk677 — CF : règle 1.');
       const e = embed('#FF4444')
-        .setTitle('👢 Kick automatique')
-        .setDescription(`<@${message.author.id}> a été kické pour avoir mentionné le MK-677.`);
+        .setTitle('🔇 Mute automatique (mk677)')
+        .setDescription(`<@${message.author.id}> a été muté pendant 10 minutes pour avoir mentionné le MK-677.\n\n**CF : règle 1.**`);
       await message.reply({ embeds: [e] });
-      await message.member.kick('Utilisation de !mk677');
     } catch (err) {
-      await message.reply(`❌ Impossible de kicker : ${err.message}`);
+      await message.reply(`❌ Impossible de muter : ${err.message}`);
     }
   },
- 
-  // --- BAN ---
-  '!ban': async (message, args) => {
-    if (!message.member.permissions.has(PermissionsBitField.Flags.BanMembers)) {
-      return message.reply('❌ Tu n\'as pas la permission de bannir des membres.');
+
+  // --- TICKET ---
+  '!ticket': async (message, args) => {
+    const fullText = args.join(' ');
+    const parts = fullText.split('|').map(p => p.trim());
+
+    if (parts.length < 2 || !parts[0] || !parts[1]) {
+      return message.reply('❌ Format : `!ticket <motif du rôle> | <motif de contestation>`');
     }
-    const target = message.mentions.members.first();
-    if (!target) return message.reply('❌ Mentionne un utilisateur à bannir : `!ban @user [raison]`');
-    if (!target.bannable) return message.reply('❌ Je ne peux pas bannir cet utilisateur (rôle supérieur ou égal).');
- 
-    const reason = args.slice(1).join(' ') || 'Aucune raison fournie';
+
+    const motifRole = parts[0];
+    const motifContest = parts[1];
+    const ticketNumber = Math.floor(1000 + Math.random() * 9000);
+    const ticketName = `ticket-${ticketNumber}`;
+
+    const guild = message.guild;
+    const viewRole = guild.roles.cache.get(CONFIG.TICKET_VIEW_ROLE_ID);
+    if (!viewRole) {
+      return message.reply('❌ Rôle de ticket introuvable. Vérifie la configuration.');
+    }
+
+    const overwrites = [
+      {
+        id: guild.roles.everyone.id,
+        deny: [PermissionsBitField.Flags.ViewChannel],
+      },
+      {
+        id: viewRole.id,
+        allow: [PermissionsBitField.Flags.ViewChannel],
+        deny: [PermissionsBitField.Flags.SendMessages],
+      },
+      {
+        id: message.author.id,
+        allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory],
+      },
+      ...CONFIG.ADMIN_IDS.map((adminId) => ({
+        id: adminId,
+        allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory],
+      })),
+    ];
+
     try {
+      const channel = await guild.channels.create({
+        name: ticketName,
+        type: 0, // GUILD_TEXT
+        permissionOverwrites: overwrites,
+        reason: `Ouverture de ticket ${ticketNumber} par ${message.author.tag}`,
+      });
+
+      const ticketEmbed = embed('#00FF66')
+        .setTitle(`🎫 Ticket #${ticketNumber}`)
+        .setDescription('Ticket créé avec succès. Le staff vous répondra sous 24h. En cas de mauvaise défense, un warn peut être appliqué.')
+        .addFields(
+          { name: '🧾 Ouverture par', value: `<@${message.author.id}>`, inline: true },
+          { name: '🧷 Rôle visualisation', value: `<@&${viewRole.id}>`, inline: true },
+          { name: '📌 Motif du rôle', value: motifRole, inline: false },
+          { name: '⚠️ Motif de contestation', value: motifContest, inline: false },
+          { name: '⏳ Review staff', value: '24 heures', inline: true },
+        )
+        .setFooter({ text: `ID Ticket: ${ticketNumber}` });
+
+      await channel.send({ content: `<@${message.author.id}>`, embeds: [ticketEmbed] });
+      await message.reply(`✅ Ton ticket a été créé : ${channel}`);
+    } catch (error) {
+      console.error('Erreur création ticket:', error);
+      message.reply(`❌ Impossible de créer le ticket : ${error.message}`);
+    }
+  },
+
+  // --- MOMMY ASMR ---
+  '!mommy-asmr': async (message) => {
+    if (message.author.id !== CONFIG.MOMMY_ASMR_USER_ID) {
+      return message.reply('❌ Tu n’as pas la permission d’utiliser cette commande.');
+    }
+    try {
+      await message.channel.send({
+        content: '🎧 Mommy ASMR en approche...',
+        files: [CONFIG.MOMMY_ASMR_FILE_URL],
+      });
+    } catch (err) {
+      message.reply(`❌ Échec envoi ASMR : ${err.message}`);
       await target.ban({ reason: `${message.author.tag}: ${reason}`, deleteMessageSeconds: 604800 });
       const e = embed('#FF4444')
         .setTitle('🔨 Utilisateur banni')
