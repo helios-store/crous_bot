@@ -34,9 +34,9 @@ const CONFIG = {
   //  🎭  REACTION ROLE — À MODIFIER
   // ============================================================
   REACTION_ROLE: {
-    MESSAGE_ID: '111222333444555666',  // ← ID du message sur lequel réagir
-    CHANNEL_ID: '111222333444555666',  // ← ID du channel où se trouve le message
-    ROLE_ID:    '111222333444555666',  // ← ID du rôle à donner
+    MESSAGE_ID: '1488586740162629823',  // ← ID du message sur lequel réagir
+    CHANNEL_ID: '1488585932713103451',  // ← ID du channel où se trouve le message
+    ROLE_ID:    '1488288795530100928',  // ← ID du rôle à donner
     EMOJI:      '✅',                  // ← Emoji de la réaction (ex: ✅ ou un emoji custom)
   },
 };
