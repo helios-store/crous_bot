@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, EmbedBuilder, PermissionsBitField } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, PermissionsBitField, Partials } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
@@ -10,41 +10,41 @@ const axios = require('axios');
 const CONFIG = {
   // IDs Discord des utilisateurs autorisés à utiliser les commandes admin
   ADMIN_IDS: [
-    '980099925071241227',  // ← Remplace par ton ID Discord
-    '557275102358667277', // ← Ajoute d'autres IDs si besoin
-    '1475499606304358463', // ← Ajoute d'autres IDs si besoin
-    '1469795368580677717', // ← Ajoute d'autres IDs si besoin
-    '1465721989762256920', // ← Ajoute d'autres IDs si besoin
-    '535857300552810526', // ← Ajoute d'autres IDs si besoin
+    '980099925071241227',
+    '557275102358667277',
+    '1475499606304358463',
+    '1469795368580677717',
+    '1465721989762256920',
+    '535857300552810526',
   ],
  
   // Username TikTok à surveiller pour les lives (sans le @)
   TIKTOK_USERNAME: 'crousgainz',
  
   // Channel Discord où envoyer les alertes live (ID du channel)
-  LIVE_CHANNEL_ID: '1473454771305185361',  // ← Remplace par l'ID du channel
+  LIVE_CHANNEL_ID: '1473454771305185361',
  
   // Intervalle de vérification des lives TikTok (en ms) — défaut: 2 minutes
   LIVE_CHECK_INTERVAL: 2 * 60 * 1000,
  
   // Préfixe des commandes
   PREFIX: '!',
-
+ 
   // ROLE pour ticket: tout le monde du rôle peut voir, mais pas écrire (sauf staff + ouvreur).
   TICKET_VIEW_ROLE_ID: '1487674672865611806',
-
-  // Commande !mommy-asmr autorisée uniquement pour :
-  MOMMY_ASMR_USER_ID: '1469795368580677717', '535857300552810526',
-  MOMMY_ASMR_FILE_URL: 'https://cdn.pixabay.com/download/audio/2021/08/04/audio_d6cd1baf3a.mp3',
-
+ 
+  // FIX ✅ : tableau d'IDs autorisés pour !mommy-asmr
+  MOMMY_ASMR_USER_IDS: ['1469795368580677717', '535857300552810526'],
+  MOMMY_ASMR_FILE_URL: 'https://cdn.discordapp.com/attachments/817794666778460160/1488669778313875606/ScreenRecording_03-20-2026_22-35-55_1.mp3?ex=69cd9f45&is=69cc4dc5&hm=23794ca2a2df4bb6ea4165d69675a442729720e01dd8abf70f1793270e97be2c&',
+ 
   // ============================================================
   //  🎭  REACTION ROLE — À MODIFIER
   // ============================================================
   REACTION_ROLE: {
-    MESSAGE_ID: '1488586740162629823',  // ← ID du message sur lequel réagir
-    CHANNEL_ID: '1488585932713103451',  // ← ID du channel où se trouve le message
-    ROLE_ID:    '1488288795530100928',  // ← ID du rôle à donner
-    EMOJI:      '✅',                  // ← Emoji de la réaction (ex: ✅ ou un emoji custom)
+    MESSAGE_ID: '1488586740162629823',
+    CHANNEL_ID: '1488585932713103451',
+    ROLE_ID:    '1488288795530100928',
+    EMOJI:      '✅',
   },
 };
  
@@ -92,29 +92,25 @@ let studyData = loadJSON(FILES.study, {
 });
  
 let copesData = loadJSON(FILES.copes, {
-  cope: [
-    'Exemple Cope — Inutile',
-  ],
-  interesting: [
-    'Exemple Intéressant — Peut être utile',
-  ],
+  cope: ['Exemple Cope — Inutile'],
+  interesting: ['Exemple Intéressant — Peut être utile'],
 });
  
 let rulesData = loadJSON(FILES.rules, {
   1: "Pas de demande de source : Il est interdit de demander, vendre ou partager des sources de stéroïdes, peptides ou autres substances dopantes. Les discussions éducatives générales peuvent être tolérées mais aucune source ou contact ne doit être partagé.",
-  2: "Aucune discrimination : Les propos racistes, homophobes, sexistes ou discriminatoires sont strictement interdits sauf sur les iqlet. --> L’utilisation du N-word, P-word ou tout autre terme offensant est autorisé",
+  2: "Aucune discrimination : Les propos racistes, homophobes, sexistes ou discriminatoires sont strictement interdits sauf sur les iqlet. --> L'utilisation du N-word, P-word ou tout autre terme offensant est autorisé",
   3: "Respect obligatoire : Tout le monde doit être respecté. Les insultes, provocations, harcèlement ou comportements toxiques ne sont pas tolérés sauf si la personne est sous système fluide.",
   4: "Pas de spam : Le spam, flood, messages répétés, ou abus de majuscules sont interdits.",
-  5: "Publicité interdite : Pas de promotion de chaînes, serveurs, produits ou services sans l’autorisation du staff.",
+  5: "Publicité interdite : Pas de promotion de chaînes, serveurs, produits ou services sans l'autorisation du staff.",
   6: "Contenu inapproprié : Les contenus NSFW, choquants ou illégaux sont interdits.",
-  7: "Restez dans les bons salons : Merci d’utiliser les salons appropriés pour chaque sujet.",
-  8: "Respect du staff : Les décisions du staff doivent être respectées. Si vous avez un problème on s’en fou on va pas lire.",
+  7: "Restez dans les bons salons : Merci d'utiliser les salons appropriés pour chaque sujet.",
+  8: "Respect du staff : Les décisions du staff doivent être respectées. Si vous avez un problème on s'en fou on va pas lire.",
 });
  
 let liveStatus = loadJSON(FILES.liveStatus, { isLive: false, lastNotified: null });
  
 // ============================================================
-//  🤖  CLIENT DISCORD
+//  🤖  CLIENT DISCORD — FIX ✅ : Partials ajoutés
 // ============================================================
  
 const client = new Client({
@@ -125,6 +121,7 @@ const client = new Client({
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessageReactions,
   ],
+  partials: [Partials.Message, Partials.Channel, Partials.Reaction],
 });
  
 // ============================================================
@@ -158,8 +155,8 @@ const commands = {
         { name: '💊 Compléments', value: '`!cope` — Liste des compléments\n`!add-cope <nom>` *(admin)*\n`!add-interesting <nom>` *(admin)*\n`!remove-cope <nom>` *(admin)*\n`!remove-interesting <nom>` *(admin)*', inline: false },
         { name: '📜 Règles', value: '`!regles` — Toutes les règles\n`!regle<N>` — Règle numéro N (ex: `!regle3`)\n`!set-regle <N> | <texte>` *(admin)*', inline: false },
         { name: '🔨 Modération', value: '`!ban <@user> [raison]` *(Permissions Ban)*\n`!source` — Mute auto 10min + CF règle 1\n`!mk677` — Mute auto 10min', inline: false },
-        { name: '🎫 Tickets', value: '`!ticket <motif du rôle> | <motif de contestation>` — Ouvre un ticket privé visible par le rôle staff/config', inline: false },
-        { name: '🎵 ASMR', value: '`!mommy-asmr` — Commande réservée à l’ID propriétaire (envoi MP3)', inline: false },
+        { name: '🎫 Tickets', value: '`!ticket <motif du role> | <motif de contestation>` — Ouvre un ticket privé visible par le rôle staff/config', inline: false },
+        { name: '🎵 ASMR', value: '`!mommy-asmr` — Commande réservée aux IDs propriétaires (envoi MP3)', inline: false },
         { name: '🎭 Reaction Role', value: 'Réagis au message de bienvenue pour accéder au serveur', inline: false },
         { name: '🔴 Live', value: 'Détection auto des lives TikTok', inline: false },
       )
@@ -303,7 +300,7 @@ const commands = {
     }
   },
  
-  // --- MK677 (mute 10 min plutôt que kick) ---
+  // --- MK677 (mute 10 min) ---
   '!mk677': async (message) => {
     if (isAdmin(message.author.id)) return;
     try {
@@ -316,27 +313,52 @@ const commands = {
       await message.reply(`❌ Impossible de muter : ${err.message}`);
     }
   },
-
+ 
+  // --- BAN ---
+  '!ban': async (message, args) => {
+    if (!message.member.permissions.has(PermissionsBitField.Flags.BanMembers)) {
+      return message.reply('❌ Tu n\'as pas la permission de bannir des membres.');
+    }
+    const target = message.mentions.members.first();
+    if (!target) return message.reply('❌ Mentionne un utilisateur à bannir : `!ban @user [raison]`');
+    if (!target.bannable) return message.reply('❌ Je ne peux pas bannir cet utilisateur (rôle supérieur ou égal).');
+ 
+    const reason = args.slice(1).join(' ') || 'Aucune raison fournie';
+    try {
+      await target.ban({ reason: `${message.author.tag}: ${reason}`, deleteMessageSeconds: 604800 });
+      const e = embed('#FF4444')
+        .setTitle('🔨 Utilisateur banni')
+        .addFields(
+          { name: 'Utilisateur', value: target.user.tag, inline: true },
+          { name: 'Par', value: message.author.tag, inline: true },
+          { name: 'Raison', value: reason, inline: false },
+        );
+      await message.reply({ embeds: [e] });
+    } catch (err) {
+      await message.reply(`❌ Erreur lors du ban : ${err.message}`);
+    }
+  },
+ 
   // --- TICKET ---
   '!ticket': async (message, args) => {
     const fullText = args.join(' ');
     const parts = fullText.split('|').map(p => p.trim());
-
+ 
     if (parts.length < 2 || !parts[0] || !parts[1]) {
-      return message.reply('❌ Format : `!ticket <motif du rôle> | <motif de contestation>`');
+      return message.reply('❌ Format : `!ticket <motif du role> | <motif de contestation>`');
     }
-
+ 
     const motifRole = parts[0];
     const motifContest = parts[1];
     const ticketNumber = Math.floor(1000 + Math.random() * 9000);
     const ticketName = `ticket-${ticketNumber}`;
-
+ 
     const guild = message.guild;
     const viewRole = guild.roles.cache.get(CONFIG.TICKET_VIEW_ROLE_ID);
     if (!viewRole) {
       return message.reply('❌ Rôle de ticket introuvable. Vérifie la configuration.');
     }
-
+ 
     const overwrites = [
       {
         id: guild.roles.everyone.id,
@@ -356,15 +378,15 @@ const commands = {
         allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory],
       })),
     ];
-
+ 
     try {
       const channel = await guild.channels.create({
         name: ticketName,
-        type: 0, // GUILD_TEXT
+        type: 0,
         permissionOverwrites: overwrites,
         reason: `Ouverture de ticket ${ticketNumber} par ${message.author.tag}`,
       });
-
+ 
       const ticketEmbed = embed('#00FF66')
         .setTitle(`🎫 Ticket #${ticketNumber}`)
         .setDescription('Ticket créé avec succès. Le staff vous répondra sous 24h. En cas de mauvaise défense, un warn peut être appliqué.')
@@ -376,7 +398,7 @@ const commands = {
           { name: '⏳ Review staff', value: '24 heures', inline: true },
         )
         .setFooter({ text: `ID Ticket: ${ticketNumber}` });
-
+ 
       await channel.send({ content: `<@${message.author.id}>`, embeds: [ticketEmbed] });
       await message.reply(`✅ Ton ticket a été créé : ${channel}`);
     } catch (error) {
@@ -384,11 +406,11 @@ const commands = {
       message.reply(`❌ Impossible de créer le ticket : ${error.message}`);
     }
   },
-
-  // --- MOMMY ASMR ---
+ 
+  // --- MOMMY ASMR — FIX ✅ : tableau + catch propre ---
   '!mommy-asmr': async (message) => {
-    if (message.author.id !== CONFIG.MOMMY_ASMR_USER_ID) {
-      return message.reply('❌ Tu n’as pas la permission d’utiliser cette commande.');
+    if (!CONFIG.MOMMY_ASMR_USER_IDS.includes(message.author.id)) {
+      return message.reply('❌ Tu n\'as pas la permission d\'utiliser cette commande.');
     }
     try {
       await message.channel.send({
@@ -396,18 +418,7 @@ const commands = {
         files: [CONFIG.MOMMY_ASMR_FILE_URL],
       });
     } catch (err) {
-      message.reply(`❌ Échec envoi ASMR : ${err.message}`);
-      await target.ban({ reason: `${message.author.tag}: ${reason}`, deleteMessageSeconds: 604800 });
-      const e = embed('#FF4444')
-        .setTitle('🔨 Utilisateur banni')
-        .addFields(
-          { name: 'Utilisateur', value: target.user.tag, inline: true },
-          { name: 'Par', value: message.author.tag, inline: true },
-          { name: 'Raison', value: reason, inline: false },
-        );
-      await message.reply({ embeds: [e] });
-    } catch (err) {
-      await message.reply(`❌ Erreur lors du ban : ${err.message}`);
+      await message.reply(`❌ Échec envoi ASMR : ${err.message}`);
     }
   },
 };
@@ -423,7 +434,6 @@ client.on('messageCreate', async (message) => {
   const [rawCmd, ...args] = message.content.trim().split(/\s+/);
   const cmd = rawCmd.toLowerCase();
  
-  // Commande directe
   if (commands[cmd]) {
     try { await commands[cmd](message, args); }
     catch (e) { console.error(`Erreur commande ${cmd}:`, e); message.reply('❌ Une erreur est survenue.'); }
@@ -450,11 +460,9 @@ client.on('messageCreate', async (message) => {
 //  🎭  REACTION ROLE
 // ============================================================
  
-// Quand quelqu'un ajoute une réaction
 client.on('messageReactionAdd', async (reaction, user) => {
   if (user.bot) return;
  
-  // Récupère le message complet si partiel
   if (reaction.partial) {
     try { await reaction.fetch(); } catch { return; }
   }
@@ -464,7 +472,6 @@ client.on('messageReactionAdd', async (reaction, user) => {
  
   const { MESSAGE_ID, CHANNEL_ID, ROLE_ID, EMOJI } = CONFIG.REACTION_ROLE;
  
-  // Vérifie que c'est le bon message, le bon channel et le bon emoji
   if (
     reaction.message.id !== MESSAGE_ID ||
     reaction.message.channel.id !== CHANNEL_ID ||
@@ -481,9 +488,8 @@ client.on('messageReactionAdd', async (reaction, user) => {
     await member.roles.add(role);
     console.log(`[REACTION ROLE] Rôle "${role.name}" donné à ${user.tag}`);
  
-    // Message privé de confirmation
     try {
-      await user.send(`✅ Tu as bien reçu l'accès au serveur ! Bienvenue 🎉`);
+      await user.send('✅ Tu as bien reçu l\'accès au serveur ! Bienvenue 🎉');
     } catch {
       // DMs fermés, on ignore
     }
@@ -492,7 +498,6 @@ client.on('messageReactionAdd', async (reaction, user) => {
   }
 });
  
-// Quand quelqu'un retire sa réaction
 client.on('messageReactionRemove', async (reaction, user) => {
   if (user.bot) return;
  
@@ -524,11 +529,13 @@ client.on('messageReactionRemove', async (reaction, user) => {
     console.error('[REACTION ROLE] Erreur retrait rôle :', err.message);
   }
 });
+ 
+// ============================================================
+//  📺  TIKTOK LIVE CHECKER
 // ============================================================
  
 async function checkTikTokLive() {
   try {
-    // On scrape la page TikTok pour détecter un live actif
     const url = `https://www.tiktok.com/@${CONFIG.TIKTOK_USERNAME}/live`;
     const response = await axios.get(url, {
       headers: {
@@ -538,7 +545,6 @@ async function checkTikTokLive() {
       timeout: 10000,
     });
  
-    // Indicateurs de live actif dans le HTML TikTok
     const html = response.data;
     const isCurrentlyLive = (
       html.includes('"statusStr":"LIVE_STATUS_STREAMING"') ||
@@ -550,7 +556,6 @@ async function checkTikTokLive() {
     if (!channel) return;
  
     if (isCurrentlyLive && !liveStatus.isLive) {
-      // Live vient de démarrer
       liveStatus.isLive = true;
       liveStatus.lastNotified = new Date().toISOString();
       saveJSON(FILES.liveStatus, liveStatus);
@@ -565,14 +570,12 @@ async function checkTikTokLive() {
       console.log(`[LIVE] @${CONFIG.TIKTOK_USERNAME} est en live.`);
  
     } else if (!isCurrentlyLive && liveStatus.isLive) {
-      // Live terminé
       liveStatus.isLive = false;
       saveJSON(FILES.liveStatus, liveStatus);
       console.log(`[LIVE] @${CONFIG.TIKTOK_USERNAME} a terminé son live.`);
     }
  
   } catch (err) {
-    // Erreur silencieuse (rate limit, réseau, etc.)
     if (err.response?.status === 429) {
       console.warn('[LIVE] Rate limit TikTok, nouvelle tentative plus tard.');
     } else {
@@ -591,14 +594,12 @@ client.once('ready', () => {
   console.log(`📺 Surveillance TikTok: @${CONFIG.TIKTOK_USERNAME}`);
   console.log(`📢 Channel live: ${CONFIG.LIVE_CHANNEL_ID}`);
  
-  // Lancement de la vérification live
   checkTikTokLive();
   setInterval(checkTikTokLive, CONFIG.LIVE_CHECK_INTERVAL);
 });
  
 client.on('error', (err) => console.error('[Discord] Erreur client:', err));
  
-// Token depuis variable d'environnement (Railway)
 const TOKEN = process.env.DISCORD_TOKEN;
 if (!TOKEN) {
   console.error('❌ DISCORD_TOKEN manquant ! Définissez la variable d\'environnement.');
