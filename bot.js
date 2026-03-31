@@ -37,7 +37,7 @@ const CONFIG = {
     MESSAGE_ID: '1488290011425149022',  // ← ID du message sur lequel réagir
     CHANNEL_ID: '1488289976540991770',  // ← ID du channel où se trouve le message
     ROLE_ID:    '1487674672865611806',  // ← ID du rôle à donner
-    EMOJI:      '✅',                  // ← Emoji de la réaction (ex: ✅ ou un emoji custom)
+    EMOJI:      '❤️',                  // ← Emoji de la réaction (ex: ✅ ou un emoji custom)
   },
 };
  
