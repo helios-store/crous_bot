@@ -29,6 +29,16 @@ const CONFIG = {
  
   // Préfixe des commandes
   PREFIX: '!',
+ 
+  // ============================================================
+  //  🎭  REACTION ROLE — À MODIFIER
+  // ============================================================
+  REACTION_ROLE: {
+    MESSAGE_ID: '111222333444555666',  // ← ID du message sur lequel réagir
+    CHANNEL_ID: '111222333444555666',  // ← ID du channel où se trouve le message
+    ROLE_ID:    '111222333444555666',  // ← ID du rôle à donner
+    EMOJI:      '✅',                  // ← Emoji de la réaction (ex: ✅ ou un emoji custom)
+  },
 };
  
 // ============================================================
@@ -106,6 +116,7 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMessageReactions,
   ],
 });
  
@@ -140,6 +151,7 @@ const commands = {
         { name: '💊 Compléments', value: '`!cope` — Liste des compléments\n`!add-cope <nom>` *(admin)*\n`!add-interesting <nom>` *(admin)*\n`!remove-cope <nom>` *(admin)*\n`!remove-interesting <nom>` *(admin)*', inline: false },
         { name: '📜 Règles', value: '`!regles` — Toutes les règles\n`!regle<N>` — Règle numéro N (ex: `!regle3`)\n`!set-regle <N> | <texte>` *(admin)*', inline: false },
         { name: '🔨 Modération', value: '`!ban <@user> [raison]` *(Permissions Ban)*\n`!source` — Mute auto 10min + CF règle 1\n`!mk677` — Kick auto', inline: false },
+        { name: '🎭 Reaction Role', value: 'Réagis au message de bienvenue pour accéder au serveur', inline: false },
         { name: '🔴 Live', value: 'Détection auto des lives TikTok', inline: false },
       )
       .setFooter({ text: '*(admin) = Réservé aux utilisateurs autorisés' });
@@ -270,7 +282,7 @@ const commands = {
  
   // --- SOURCE (mute instantané sauf admins) ---
   '!source': async (message) => {
-    if (isAdmin(message.author.id)) return; // Les admins sont immunisés
+    if (isAdmin(message.author.id)) return;
     try {
       await message.member.timeout(10 * 60 * 1000, 'Utilisation de !source — CF : règle 1.');
       const e = embed('#FFA500')
@@ -284,7 +296,7 @@ const commands = {
  
   // --- MK677 (kick instantané sauf admins) ---
   '!mk677': async (message) => {
-    if (isAdmin(message.author.id)) return; // Les admins sont immunisés
+    if (isAdmin(message.author.id)) return;
     try {
       const e = embed('#FF4444')
         .setTitle('👢 Kick automatique')
@@ -357,7 +369,83 @@ client.on('messageCreate', async (message) => {
 });
  
 // ============================================================
-//  🔴  DÉTECTION LIVE TIKTOK
+//  🎭  REACTION ROLE
+// ============================================================
+ 
+// Quand quelqu'un ajoute une réaction
+client.on('messageReactionAdd', async (reaction, user) => {
+  if (user.bot) return;
+ 
+  // Récupère le message complet si partiel
+  if (reaction.partial) {
+    try { await reaction.fetch(); } catch { return; }
+  }
+  if (reaction.message.partial) {
+    try { await reaction.message.fetch(); } catch { return; }
+  }
+ 
+  const { MESSAGE_ID, CHANNEL_ID, ROLE_ID, EMOJI } = CONFIG.REACTION_ROLE;
+ 
+  // Vérifie que c'est le bon message, le bon channel et le bon emoji
+  if (
+    reaction.message.id !== MESSAGE_ID ||
+    reaction.message.channel.id !== CHANNEL_ID ||
+    reaction.emoji.name !== EMOJI
+  ) return;
+ 
+  try {
+    const guild = reaction.message.guild;
+    const member = await guild.members.fetch(user.id);
+    const role = guild.roles.cache.get(ROLE_ID);
+ 
+    if (!role) return console.error('[REACTION ROLE] Rôle introuvable :', ROLE_ID);
+ 
+    await member.roles.add(role);
+    console.log(`[REACTION ROLE] Rôle "${role.name}" donné à ${user.tag}`);
+ 
+    // Message privé de confirmation
+    try {
+      await user.send(`✅ Tu as bien reçu l'accès au serveur ! Bienvenue 🎉`);
+    } catch {
+      // DMs fermés, on ignore
+    }
+  } catch (err) {
+    console.error('[REACTION ROLE] Erreur ajout rôle :', err.message);
+  }
+});
+ 
+// Quand quelqu'un retire sa réaction
+client.on('messageReactionRemove', async (reaction, user) => {
+  if (user.bot) return;
+ 
+  if (reaction.partial) {
+    try { await reaction.fetch(); } catch { return; }
+  }
+  if (reaction.message.partial) {
+    try { await reaction.message.fetch(); } catch { return; }
+  }
+ 
+  const { MESSAGE_ID, CHANNEL_ID, ROLE_ID, EMOJI } = CONFIG.REACTION_ROLE;
+ 
+  if (
+    reaction.message.id !== MESSAGE_ID ||
+    reaction.message.channel.id !== CHANNEL_ID ||
+    reaction.emoji.name !== EMOJI
+  ) return;
+ 
+  try {
+    const guild = reaction.message.guild;
+    const member = await guild.members.fetch(user.id);
+    const role = guild.roles.cache.get(ROLE_ID);
+ 
+    if (!role) return;
+ 
+    await member.roles.remove(role);
+    console.log(`[REACTION ROLE] Rôle "${role.name}" retiré à ${user.tag}`);
+  } catch (err) {
+    console.error('[REACTION ROLE] Erreur retrait rôle :', err.message);
+  }
+});
 // ============================================================
  
 async function checkTikTokLive() {
