@@ -8,7 +8,6 @@ const axios = require('axios');
 // ============================================================
  
 const CONFIG = {
-  // IDs Discord des utilisateurs autorisés à utiliser les commandes admin
   ADMIN_IDS: [
     '980099925071241227',
     '557275102358667277',
@@ -18,28 +17,15 @@ const CONFIG = {
     '535857300552810526',
   ],
  
-  // Username TikTok à surveiller pour les lives (sans le @)
   TIKTOK_USERNAME: 'crousgainz',
- 
-  // Channel Discord où envoyer les alertes live (ID du channel)
   LIVE_CHANNEL_ID: '1473454771305185361',
- 
-  // Intervalle de vérification des lives TikTok (en ms) — défaut: 2 minutes
   LIVE_CHECK_INTERVAL: 2 * 60 * 1000,
- 
-  // Préfixe des commandes
   PREFIX: '!',
  
-  // ROLE pour ticket: tout le monde du rôle peut voir, mais pas écrire (sauf staff + ouvreur).
-  TICKET_VIEW_ROLE_ID: '1487674672865611806',
- 
-  // FIX ✅ : tableau d'IDs autorisés pour !mommy-asmr
   MOMMY_ASMR_USER_IDS: ['1469795368580677717', '535857300552810526'],
   MOMMY_ASMR_FILE_URL: 'https://cdn.discordapp.com/attachments/817794666778460160/1488669778313875606/ScreenRecording_03-20-2026_22-35-55_1.mp3?ex=69cd9f45&is=69cc4dc5&hm=23794ca2a2df4bb6ea4165d69675a442729720e01dd8abf70f1793270e97be2c&',
  
-  // ============================================================
-  //  🎭  REACTION ROLE — À MODIFIER
-  // ============================================================
+  // Reaction role simple (vérification)
   REACTION_ROLE: {
     MESSAGE_ID: '1488290011425149022',
     CHANNEL_ID: '1488289976540991770',
@@ -54,13 +40,14 @@ const CONFIG = {
  
 const DATA_DIR = path.join(__dirname, 'data');
 const FILES = {
-  study:      path.join(DATA_DIR, 'study.json'),
-  copes:      path.join(DATA_DIR, 'copes.json'),
-  rules:      path.join(DATA_DIR, 'rules.json'),
-  liveStatus: path.join(DATA_DIR, 'live_status.json'),
+  study:         path.join(DATA_DIR, 'study.json'),
+  copes:         path.join(DATA_DIR, 'copes.json'),
+  rules:         path.join(DATA_DIR, 'rules.json'),
+  liveStatus:    path.join(DATA_DIR, 'live_status.json'),
+  reactionRoles: path.join(DATA_DIR, 'reaction_roles.json'),
+  ticketConfig:  path.join(DATA_DIR, 'ticket_config.json'),
 };
  
-// Création du dossier data si inexistant
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
  
 // ============================================================
@@ -80,7 +67,7 @@ function saveJSON(file, data) {
 }
  
 // ============================================================
-//  📦  DONNÉES PAR DÉFAUT
+//  📦  DONNÉES
 // ============================================================
  
 let studyData = loadJSON(FILES.study, {
@@ -108,9 +95,21 @@ let rulesData = loadJSON(FILES.rules, {
 });
  
 let liveStatus = loadJSON(FILES.liveStatus, { isLive: false, lastNotified: null });
+let reactionRolesData = loadJSON(FILES.reactionRoles, {});
+ 
+// Config ticket — rôle viewer sauvegardé dans un fichier JSON
+// viewRoleId  : peut voir le ticket mais pas écrire (ex: @Membres)
+// staffRoleId : peut voir ET écrire dans le ticket (ex: @Staff) — optionnel
+let ticketConfig = loadJSON(FILES.ticketConfig, {
+  viewRoleId: null,   // défini via !ticket-setrole
+  staffRoleId: null,  // défini via !ticket-setstaff (optionnel, les ADMIN_IDS peuvent toujours écrire)
+});
+ 
+function saveReactionRoles() { saveJSON(FILES.reactionRoles, reactionRolesData); }
+function saveTicketConfig()   { saveJSON(FILES.ticketConfig, ticketConfig); }
  
 // ============================================================
-//  🤖  CLIENT DISCORD — FIX ✅ : Partials ajoutés
+//  🤖  CLIENT DISCORD
 // ============================================================
  
 const client = new Client({
@@ -124,20 +123,25 @@ const client = new Client({
   partials: [Partials.Message, Partials.Channel, Partials.Reaction],
 });
  
-// ============================================================
-//  🔑  VÉRIFICATION ADMIN
-// ============================================================
- 
-function isAdmin(userId) {
-  return CONFIG.ADMIN_IDS.includes(userId);
-}
+function isAdmin(userId) { return CONFIG.ADMIN_IDS.includes(userId); }
+function embed(color = '#5865F2') { return new EmbedBuilder().setColor(color).setTimestamp(); }
  
 // ============================================================
-//  🎨  EMBEDS HELPER
+//  🔄  HELPER — Met à jour l'embed du message RR
 // ============================================================
  
-function embed(color = '#5865F2') {
-  return new EmbedBuilder().setColor(color).setTimestamp();
+async function updateRREmbed(targetMessage, rrEntry) {
+  const rolesList = Object.entries(rrEntry.roles)
+    .map(([emoji, roleId]) => `${emoji} — <@&${roleId}>`)
+    .join('\n') || '*Aucun rôle configuré.*';
+ 
+  const updatedEmbed = embed('#7289DA')
+    .setTitle(`🎭 ${rrEntry.titre}`)
+    .setDescription(rrEntry.description)
+    .addFields({ name: '📋 Rôles disponibles', value: rolesList, inline: false })
+    .setFooter({ text: 'Réagis pour obtenir un rôle • Retire ta réaction pour le perdre' });
+ 
+  await targetMessage.edit({ embeds: [updatedEmbed] });
 }
  
 // ============================================================
@@ -148,85 +152,312 @@ const commands = {
  
   // --- AIDE ---
   '!aide': async (message) => {
+    const viewRoleDisplay = ticketConfig.viewRoleId ? `<@&${ticketConfig.viewRoleId}>` : '*non défini*';
+    const staffRoleDisplay = ticketConfig.staffRoleId ? `<@&${ticketConfig.staffRoleId}>` : '*non défini (admins seulement)*';
+ 
     const e = embed('#5865F2')
       .setTitle('📖 Commandes disponibles')
       .addFields(
-        { name: '📑 Études', value: '`!pubmed` — Affiche la dernière étude\n`!def-etude <titre> | <url> | <description>` *(admin)*', inline: false },
-        { name: '💊 Compléments', value: '`!cope` — Liste des compléments\n`!add-cope <nom>` *(admin)*\n`!add-interesting <nom>` *(admin)*\n`!remove-cope <nom>` *(admin)*\n`!remove-interesting <nom>` *(admin)*', inline: false },
-        { name: '📜 Règles', value: '`!regles` — Toutes les règles\n`!regle<N>` — Règle numéro N (ex: `!regle3`)\n`!set-regle <N> | <texte>` *(admin)*', inline: false },
-        { name: '🔨 Modération', value: '`!ban <@user> [raison]` *(Permissions Ban)*\n`!source` — Mute auto 10min + CF règle 1\n`!mk677` — Mute auto 10min', inline: false },
-        { name: '🎫 Tickets', value: '`!ticket <motif du role> | <motif de contestation>` — Ouvre un ticket privé visible par le rôle staff/config', inline: false },
-        { name: '🎵 ASMR', value: '`!mommy-asmr` — Commande réservée aux IDs propriétaires (envoi MP3)', inline: false },
-        { name: '🎭 Reaction Role', value: 'Réagis au message de bienvenue pour accéder au serveur', inline: false },
+        { name: '📑 Études', value: '`!pubmed`\n`!def-etude <titre> | <url> | <description>` *(admin)*', inline: false },
+        { name: '💊 Compléments', value: '`!cope`\n`!add-cope` / `!add-interesting` / `!remove-cope` / `!remove-interesting` *(admin)*', inline: false },
+        { name: '📜 Règles', value: '`!regles` • `!regle<N>` • `!set-regle <N> | <texte>` *(admin)*', inline: false },
+        { name: '🔨 Modération', value: '`!ban <@user> [raison]` • `!source` • `!mk677`', inline: false },
+        { name: '🎫 Tickets', value: [
+          '`!ticket <motif>` — Ouvre un ticket',
+          '`!ticket-setrole @role` — Définit le rôle qui voit les tickets *(admin)*',
+          '`!ticket-setstaff @role` — Définit le rôle staff qui peut écrire *(admin)*',
+          '`!ticket-config` — Affiche la config actuelle *(admin)*',
+          `\nRôle viewer actuel : ${viewRoleDisplay}`,
+          `Rôle staff actuel : ${staffRoleDisplay}`,
+        ].join('\n'), inline: false },
+        { name: '🎭 Reaction Roles *(admin)*', value: [
+          '`!rr-setup <#channel> | <titre> | <description>`',
+          '`!rr-add <messageID> | <emoji> | <@role>`',
+          '`!rr-remove <messageID> | <emoji>`',
+          '`!rr-list` • `!rr-delete <messageID>`',
+        ].join('\n'), inline: false },
+        { name: '🎵 ASMR', value: '`!mommy-asmr` *(IDs autorisés)*', inline: false },
         { name: '🔴 Live', value: 'Détection auto des lives TikTok', inline: false },
       )
       .setFooter({ text: '*(admin) = Réservé aux utilisateurs autorisés' });
     await message.reply({ embeds: [e] });
   },
  
-  // --- PUBMED ---
-  '!pubmed': async (message) => {
-    const fields = [
-      { name: '📄 Titre', value: studyData.title || 'Non défini', inline: false },
-    ];
-    if (studyData.url) fields.push({ name: '🔗 Lien', value: studyData.url, inline: false });
-    if (studyData.setBy) fields.push({ name: '👤 Définie par', value: `<@${studyData.setBy}>`, inline: true });
-    if (studyData.setAt) fields.push({ name: '📅 Date', value: studyData.setAt, inline: true });
+  // ============================================================
+  //  🎫  TICKETS
+  // ============================================================
  
-    const e = embed('#00B5D8')
-      .setTitle('🔬 Dernière étude partagée')
-      .setDescription(studyData.description || 'Aucune description.')
-      .addFields(fields);
+  // Définit le rôle qui peut VOIR les tickets (mais pas écrire)
+  '!ticket-setrole': async (message) => {
+    if (!isAdmin(message.author.id)) return message.reply('❌ Permission refusée.');
+    const role = message.mentions.roles.first();
+    if (!role) return message.reply('❌ Mentionne un rôle. Exemple : `!ticket-setrole @Membres`');
  
+    ticketConfig.viewRoleId = role.id;
+    saveTicketConfig();
+    await message.reply(`✅ Rôle viewer des tickets défini : <@&${role.id}>\nCe rôle pourra **voir** les tickets mais pas y écrire.`);
+  },
+ 
+  // Définit le rôle staff qui peut VOIR et ÉCRIRE dans les tickets
+  '!ticket-setstaff': async (message) => {
+    if (!isAdmin(message.author.id)) return message.reply('❌ Permission refusée.');
+    const role = message.mentions.roles.first();
+    if (!role) return message.reply('❌ Mentionne un rôle. Exemple : `!ticket-setstaff @Staff`');
+ 
+    ticketConfig.staffRoleId = role.id;
+    saveTicketConfig();
+    await message.reply(`✅ Rôle staff des tickets défini : <@&${role.id}>\nCe rôle pourra **voir et écrire** dans les tickets.`);
+  },
+ 
+  // Affiche la config actuelle des tickets
+  '!ticket-config': async (message) => {
+    if (!isAdmin(message.author.id)) return message.reply('❌ Permission refusée.');
+    const e = embed('#00FF66')
+      .setTitle('🎫 Configuration des tickets')
+      .addFields(
+        {
+          name: '👁️ Rôle viewer (voit mais ne peut pas écrire)',
+          value: ticketConfig.viewRoleId ? `<@&${ticketConfig.viewRoleId}>` : '❌ Non défini — utilise `!ticket-setrole @role`',
+          inline: false,
+        },
+        {
+          name: '✍️ Rôle staff (voit et peut écrire)',
+          value: ticketConfig.staffRoleId ? `<@&${ticketConfig.staffRoleId}>` : '⚠️ Non défini — seuls les admins du bot peuvent écrire\nUtilise `!ticket-setstaff @role`',
+          inline: false,
+        },
+      );
     await message.reply({ embeds: [e] });
   },
  
+  // Ouvre un ticket — commande simplifiée : !ticket <motif>
+  '!ticket': async (message, args) => {
+    const motif = args.join(' ').trim();
+    if (!motif) return message.reply('❌ Format : `!ticket <motif>`\nExemple : `!ticket Je conteste mon warn du 20/03`');
+ 
+    const guild = message.guild;
+    const ticketNumber = Math.floor(1000 + Math.random() * 9000);
+ 
+    // Construction des permissions
+    const overwrites = [
+      // @everyone ne voit pas
+      { id: guild.roles.everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] },
+    ];
+ 
+    // Rôle viewer : voit mais ne peut pas écrire
+    if (ticketConfig.viewRoleId) {
+      const viewRole = guild.roles.cache.get(ticketConfig.viewRoleId);
+      if (viewRole) {
+        overwrites.push({
+          id: viewRole.id,
+          allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.ReadMessageHistory],
+          deny: [PermissionsBitField.Flags.SendMessages],
+        });
+      }
+    }
+ 
+    // Rôle staff : voit et peut écrire
+    if (ticketConfig.staffRoleId) {
+      const staffRole = guild.roles.cache.get(ticketConfig.staffRoleId);
+      if (staffRole) {
+        overwrites.push({
+          id: staffRole.id,
+          allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory],
+        });
+      }
+    }
+ 
+    // Ouvreur du ticket : voit et peut écrire
+    overwrites.push({
+      id: message.author.id,
+      allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory],
+    });
+ 
+    // Admins du bot : voit et peut écrire
+    for (const adminId of CONFIG.ADMIN_IDS) {
+      overwrites.push({
+        id: adminId,
+        allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory],
+      });
+    }
+ 
+    try {
+      const channel = await guild.channels.create({
+        name: `ticket-${ticketNumber}`,
+        type: 0,
+        permissionOverwrites: overwrites,
+        reason: `Ticket #${ticketNumber} ouvert par ${message.author.tag}`,
+      });
+ 
+      const staffMention = ticketConfig.staffRoleId ? `<@&${ticketConfig.staffRoleId}>` : '';
+ 
+      const ticketEmbed = embed('#00FF66')
+        .setTitle(`🎫 Ticket #${ticketNumber}`)
+        .setDescription('Le staff va traiter ta demande sous 24h.')
+        .addFields(
+          { name: '🧾 Ouvert par', value: `<@${message.author.id}>`, inline: true },
+          { name: '📌 Motif', value: motif, inline: false },
+        )
+        .setFooter({ text: `Ticket #${ticketNumber}` });
+ 
+      await channel.send({
+        content: `<@${message.author.id}>${staffMention ? ` ${staffMention}` : ''}`,
+        embeds: [ticketEmbed],
+      });
+ 
+      await message.reply(`✅ Ton ticket a été créé : ${channel}`);
+    } catch (error) {
+      console.error('Erreur création ticket:', error);
+      message.reply(`❌ Impossible de créer le ticket : ${error.message}`);
+    }
+  },
+ 
+  // ============================================================
+  //  🎭  MULTI-REACTION ROLES — Commandes de setup
+  // ============================================================
+ 
+  '!rr-setup': async (message, args) => {
+    if (!isAdmin(message.author.id)) return message.reply('❌ Permission refusée.');
+    const parts = args.join(' ').split('|').map(s => s.trim());
+    if (parts.length < 2) return message.reply('❌ Format : `!rr-setup <#channel> | <titre> | <description (optionnelle)>`');
+ 
+    const targetChannel = message.mentions.channels.first();
+    if (!targetChannel) return message.reply('❌ Mentionne un channel valide.');
+ 
+    const titre = parts[1];
+    const description = parts[2] || 'Réagis avec les emojis ci-dessous pour obtenir tes rôles !';
+ 
+    const rrEmbed = embed('#7289DA')
+      .setTitle(`🎭 ${titre}`)
+      .setDescription(description)
+      .addFields({ name: '📋 Rôles disponibles', value: '*Aucun rôle configuré pour l\'instant.*', inline: false })
+      .setFooter({ text: 'Réagis pour obtenir un rôle • Retire ta réaction pour le perdre' });
+ 
+    const sent = await targetChannel.send({ embeds: [rrEmbed] });
+ 
+    reactionRolesData[sent.id] = { channelId: targetChannel.id, titre, description, roles: {} };
+    saveReactionRoles();
+ 
+    await message.reply(`✅ Message de reaction role créé dans ${targetChannel} !\n📋 ID : \`${sent.id}\`\n\nAjoute des rôles avec : \`!rr-add ${sent.id} | 🔴 | @MonRole\``);
+  },
+ 
+  '!rr-add': async (message, args) => {
+    if (!isAdmin(message.author.id)) return message.reply('❌ Permission refusée.');
+    const parts = args.join(' ').split('|').map(s => s.trim());
+    if (parts.length < 3) return message.reply('❌ Format : `!rr-add <messageID> | <emoji> | <@role>`');
+ 
+    const messageId = parts[0];
+    const emoji = parts[1];
+    const role = message.mentions.roles.first();
+ 
+    if (!role) return message.reply('❌ Mentionne un rôle valide.');
+    if (!reactionRolesData[messageId]) return message.reply(`❌ Message introuvable avec l'ID \`${messageId}\`. Utilise \`!rr-list\`.`);
+ 
+    const rrEntry = reactionRolesData[messageId];
+    if (rrEntry.roles[emoji]) return message.reply(`⚠️ L'emoji ${emoji} est déjà utilisé. Retire-le avec \`!rr-remove ${messageId} | ${emoji}\``);
+ 
+    try {
+      const targetChannel = await client.channels.fetch(rrEntry.channelId);
+      const targetMessage = await targetChannel.messages.fetch(messageId);
+      await targetMessage.react(emoji);
+      rrEntry.roles[emoji] = role.id;
+      saveReactionRoles();
+      await updateRREmbed(targetMessage, rrEntry);
+      await message.reply(`✅ ${emoji} → <@&${role.id}> ajouté !`);
+    } catch (err) {
+      console.error('[RR-ADD] Erreur :', err.message);
+      await message.reply(`❌ Erreur : ${err.message}`);
+    }
+  },
+ 
+  '!rr-remove': async (message, args) => {
+    if (!isAdmin(message.author.id)) return message.reply('❌ Permission refusée.');
+    const parts = args.join(' ').split('|').map(s => s.trim());
+    if (parts.length < 2) return message.reply('❌ Format : `!rr-remove <messageID> | <emoji>`');
+ 
+    const [messageId, emoji] = parts;
+    if (!reactionRolesData[messageId]) return message.reply(`❌ Message introuvable avec l'ID \`${messageId}\`.`);
+    if (!reactionRolesData[messageId].roles[emoji]) return message.reply(`❌ L'emoji ${emoji} n'est pas configuré sur ce message.`);
+ 
+    try {
+      const targetChannel = await client.channels.fetch(reactionRolesData[messageId].channelId);
+      const targetMessage = await targetChannel.messages.fetch(messageId);
+      const reaction = targetMessage.reactions.cache.find(r => r.emoji.name === emoji);
+      if (reaction) await reaction.remove();
+      delete reactionRolesData[messageId].roles[emoji];
+      saveReactionRoles();
+      await updateRREmbed(targetMessage, reactionRolesData[messageId]);
+      await message.reply(`✅ Emoji ${emoji} retiré.`);
+    } catch (err) {
+      console.error('[RR-REMOVE] Erreur :', err.message);
+      await message.reply(`❌ Erreur : ${err.message}`);
+    }
+  },
+ 
+  '!rr-list': async (message) => {
+    if (!isAdmin(message.author.id)) return message.reply('❌ Permission refusée.');
+    const entries = Object.entries(reactionRolesData);
+    if (entries.length === 0) return message.reply('ℹ️ Aucun message de reaction role configuré. Utilise `!rr-setup`.');
+ 
+    const fields = entries.map(([msgId, data]) => ({
+      name: `📌 "${data.titre}" — \`${msgId}\``,
+      value: `Channel: <#${data.channelId}>\n${Object.entries(data.roles).map(([e, r]) => `${e} → <@&${r}>`).join('\n') || '*Aucun rôle*'}`,
+      inline: false,
+    }));
+ 
+    await message.reply({ embeds: [embed('#7289DA').setTitle('🎭 Reaction Roles configurés').addFields(fields)] });
+  },
+ 
+  '!rr-delete': async (message, args) => {
+    if (!isAdmin(message.author.id)) return message.reply('❌ Permission refusée.');
+    const messageId = args[0];
+    if (!messageId) return message.reply('❌ Format : `!rr-delete <messageID>`');
+    if (!reactionRolesData[messageId]) return message.reply(`❌ Message introuvable avec l'ID \`${messageId}\`.`);
+ 
+    try {
+      const targetChannel = await client.channels.fetch(reactionRolesData[messageId].channelId);
+      const targetMessage = await targetChannel.messages.fetch(messageId);
+      await targetMessage.delete();
+    } catch { console.warn('[RR-DELETE] Message déjà supprimé.'); }
+ 
+    delete reactionRolesData[messageId];
+    saveReactionRoles();
+    await message.reply(`✅ Message de reaction role \`${messageId}\` supprimé.`);
+  },
+ 
+  // --- PUBMED ---
+  '!pubmed': async (message) => {
+    const fields = [{ name: '📄 Titre', value: studyData.title || 'Non défini', inline: false }];
+    if (studyData.url) fields.push({ name: '🔗 Lien', value: studyData.url, inline: false });
+    if (studyData.setBy) fields.push({ name: '👤 Définie par', value: `<@${studyData.setBy}>`, inline: true });
+    if (studyData.setAt) fields.push({ name: '📅 Date', value: studyData.setAt, inline: true });
+    await message.reply({ embeds: [embed('#00B5D8').setTitle('🔬 Dernière étude partagée').setDescription(studyData.description || 'Aucune description.').addFields(fields)] });
+  },
+ 
   '!def-etude': async (message, args) => {
-    if (!isAdmin(message.author.id)) {
-      return message.reply('❌ Tu n\'as pas la permission d\'utiliser cette commande.');
-    }
-    const fullText = args.join(' ');
-    const parts = fullText.split('|').map(s => s.trim());
-    if (parts.length < 2) {
-      return message.reply('❌ Format : `!def-etude <titre> | <url> | <description>`\nL\'URL et la description sont optionnelles.');
-    }
-    studyData = {
-      title: parts[0] || 'Sans titre',
-      url: parts[1] || '',
-      description: parts[2] || '',
-      setBy: message.author.id,
-      setAt: new Date().toLocaleDateString('fr-FR'),
-    };
+    if (!isAdmin(message.author.id)) return message.reply('❌ Tu n\'as pas la permission d\'utiliser cette commande.');
+    const parts = args.join(' ').split('|').map(s => s.trim());
+    if (parts.length < 2) return message.reply('❌ Format : `!def-etude <titre> | <url> | <description>`');
+    studyData = { title: parts[0] || 'Sans titre', url: parts[1] || '', description: parts[2] || '', setBy: message.author.id, setAt: new Date().toLocaleDateString('fr-FR') };
     saveJSON(FILES.study, studyData);
     await message.reply(`✅ Étude mise à jour : **${studyData.title}**`);
   },
  
   // --- COPE / INTÉRESSANT ---
   '!cope': async (message) => {
-    const copeList = copesData.cope.length > 0
-      ? copesData.cope.map((c, i) => `${i + 1}. ${c}`).join('\n')
-      : '*Aucun complément dans cette liste.*';
-    const interestingList = copesData.interesting.length > 0
-      ? copesData.interesting.map((c, i) => `${i + 1}. ${c}`).join('\n')
-      : '*Aucun complément dans cette liste.*';
- 
-    const e = embed('#FF6B6B')
-      .setTitle('💊 Liste des compléments')
-      .addFields(
-        { name: '❌ COPE (Inutiles / À éviter)', value: copeList.slice(0, 1024), inline: false },
-        { name: '✅ Intéressants / Utiles', value: interestingList.slice(0, 1024), inline: false },
-      )
-      .setFooter({ text: `${copesData.cope.length} cope(s) | ${copesData.interesting.length} intéressant(s)` });
-    await message.reply({ embeds: [e] });
+    const copeList = copesData.cope.length > 0 ? copesData.cope.map((c, i) => `${i + 1}. ${c}`).join('\n') : '*Aucun complément dans cette liste.*';
+    const interestingList = copesData.interesting.length > 0 ? copesData.interesting.map((c, i) => `${i + 1}. ${c}`).join('\n') : '*Aucun complément dans cette liste.*';
+    await message.reply({ embeds: [embed('#FF6B6B').setTitle('💊 Liste des compléments').addFields(
+      { name: '❌ COPE (Inutiles / À éviter)', value: copeList.slice(0, 1024), inline: false },
+      { name: '✅ Intéressants / Utiles', value: interestingList.slice(0, 1024), inline: false },
+    ).setFooter({ text: `${copesData.cope.length} cope(s) | ${copesData.interesting.length} intéressant(s)` })] });
   },
  
   '!add-cope': async (message, args) => {
     if (!isAdmin(message.author.id)) return message.reply('❌ Permission refusée.');
     const name = args.join(' ').trim();
     if (!name) return message.reply('❌ Format : `!add-cope <nom>`');
-    if (copesData.cope.includes(name)) return message.reply('⚠️ Ce complément est déjà dans la liste Cope.');
-    copesData.cope.push(name);
-    saveJSON(FILES.copes, copesData);
+    if (copesData.cope.includes(name)) return message.reply('⚠️ Déjà dans la liste Cope.');
+    copesData.cope.push(name); saveJSON(FILES.copes, copesData);
     await message.reply(`✅ **${name}** ajouté à la liste Cope.`);
   },
  
@@ -234,9 +465,8 @@ const commands = {
     if (!isAdmin(message.author.id)) return message.reply('❌ Permission refusée.');
     const name = args.join(' ').trim();
     if (!name) return message.reply('❌ Format : `!add-interesting <nom>`');
-    if (copesData.interesting.includes(name)) return message.reply('⚠️ Ce complément est déjà dans la liste Intéressants.');
-    copesData.interesting.push(name);
-    saveJSON(FILES.copes, copesData);
+    if (copesData.interesting.includes(name)) return message.reply('⚠️ Déjà dans la liste Intéressants.');
+    copesData.interesting.push(name); saveJSON(FILES.copes, copesData);
     await message.reply(`✅ **${name}** ajouté à la liste Intéressants.`);
   },
  
@@ -245,8 +475,7 @@ const commands = {
     const name = args.join(' ').trim();
     const idx = copesData.cope.indexOf(name);
     if (idx === -1) return message.reply(`❌ **${name}** introuvable dans la liste Cope.`);
-    copesData.cope.splice(idx, 1);
-    saveJSON(FILES.copes, copesData);
+    copesData.cope.splice(idx, 1); saveJSON(FILES.copes, copesData);
     await message.reply(`✅ **${name}** retiré de la liste Cope.`);
   },
  
@@ -255,171 +484,65 @@ const commands = {
     const name = args.join(' ').trim();
     const idx = copesData.interesting.indexOf(name);
     if (idx === -1) return message.reply(`❌ **${name}** introuvable dans la liste Intéressants.`);
-    copesData.interesting.splice(idx, 1);
-    saveJSON(FILES.copes, copesData);
+    copesData.interesting.splice(idx, 1); saveJSON(FILES.copes, copesData);
     await message.reply(`✅ **${name}** retiré de la liste Intéressants.`);
   },
  
   // --- RÈGLES ---
   '!regles': async (message) => {
-    const rulesList = Object.entries(rulesData)
-      .sort(([a], [b]) => Number(a) - Number(b))
-      .map(([n, text]) => `**${n}.** ${text}`)
-      .join('\n');
- 
-    const e = embed('#FAD961')
-      .setTitle('📜 Règles du serveur')
-      .setDescription(rulesList || '*Aucune règle définie.*');
-    await message.reply({ embeds: [e] });
+    const rulesList = Object.entries(rulesData).sort(([a], [b]) => Number(a) - Number(b)).map(([n, text]) => `**${n}.** ${text}`).join('\n');
+    await message.reply({ embeds: [embed('#FAD961').setTitle('📜 Règles du serveur').setDescription(rulesList || '*Aucune règle définie.*')] });
   },
  
   '!set-regle': async (message, args) => {
     if (!isAdmin(message.author.id)) return message.reply('❌ Permission refusée.');
-    const fullText = args.join(' ');
-    const parts = fullText.split('|').map(s => s.trim());
-    if (parts.length < 2 || isNaN(Number(parts[0]))) {
-      return message.reply('❌ Format : `!set-regle <numéro> | <texte>`');
-    }
-    const num = parts[0];
-    rulesData[num] = parts[1];
-    saveJSON(FILES.rules, rulesData);
-    await message.reply(`✅ Règle **${num}** mise à jour.`);
+    const parts = args.join(' ').split('|').map(s => s.trim());
+    if (parts.length < 2 || isNaN(Number(parts[0]))) return message.reply('❌ Format : `!set-regle <numéro> | <texte>`');
+    rulesData[parts[0]] = parts[1]; saveJSON(FILES.rules, rulesData);
+    await message.reply(`✅ Règle **${parts[0]}** mise à jour.`);
   },
  
-  // --- SOURCE (mute instantané sauf admins) ---
+  // --- SOURCE ---
   '!source': async (message) => {
     if (isAdmin(message.author.id)) return;
     try {
       await message.member.timeout(10 * 60 * 1000, 'Utilisation de !source — CF : règle 1.');
-      const e = embed('#FFA500')
-        .setTitle('🔇 Mute automatique')
-        .setDescription(`<@${message.author.id}> a été muté pendant 10 minutes.\n\n**CF : règle 1.**`);
-      await message.reply({ embeds: [e] });
-    } catch (err) {
-      await message.reply(`❌ Impossible de muter : ${err.message}`);
-    }
+      await message.reply({ embeds: [embed('#FFA500').setTitle('🔇 Mute automatique').setDescription(`<@${message.author.id}> a été muté pendant 10 minutes.\n\n**CF : règle 1.**`)] });
+    } catch (err) { await message.reply(`❌ Impossible de muter : ${err.message}`); }
   },
  
-  // --- MK677 (mute 10 min) ---
+  // --- MK677 ---
   '!mk677': async (message) => {
     if (isAdmin(message.author.id)) return;
     try {
       await message.member.timeout(10 * 60 * 1000, 'Utilisation de !mk677 — CF : règle 1.');
-      const e = embed('#FF4444')
-        .setTitle('🔇 Mute automatique (mk677)')
-        .setDescription(`<@${message.author.id}> a été muté pendant 10 minutes pour avoir mentionné le MK-677.\n\n**CF : règle 1.**`);
-      await message.reply({ embeds: [e] });
-    } catch (err) {
-      await message.reply(`❌ Impossible de muter : ${err.message}`);
-    }
+      await message.reply({ embeds: [embed('#FF4444').setTitle('🔇 Mute automatique (mk677)').setDescription(`<@${message.author.id}> a été muté pendant 10 minutes pour avoir mentionné le MK-677.\n\n**CF : règle 1.**`)] });
+    } catch (err) { await message.reply(`❌ Impossible de muter : ${err.message}`); }
   },
  
   // --- BAN ---
   '!ban': async (message, args) => {
-    if (!message.member.permissions.has(PermissionsBitField.Flags.BanMembers)) {
-      return message.reply('❌ Tu n\'as pas la permission de bannir des membres.');
-    }
+    if (!message.member.permissions.has(PermissionsBitField.Flags.BanMembers)) return message.reply('❌ Tu n\'as pas la permission de bannir des membres.');
     const target = message.mentions.members.first();
     if (!target) return message.reply('❌ Mentionne un utilisateur à bannir : `!ban @user [raison]`');
     if (!target.bannable) return message.reply('❌ Je ne peux pas bannir cet utilisateur (rôle supérieur ou égal).');
- 
     const reason = args.slice(1).join(' ') || 'Aucune raison fournie';
     try {
       await target.ban({ reason: `${message.author.tag}: ${reason}`, deleteMessageSeconds: 604800 });
-      const e = embed('#FF4444')
-        .setTitle('🔨 Utilisateur banni')
-        .addFields(
-          { name: 'Utilisateur', value: target.user.tag, inline: true },
-          { name: 'Par', value: message.author.tag, inline: true },
-          { name: 'Raison', value: reason, inline: false },
-        );
-      await message.reply({ embeds: [e] });
-    } catch (err) {
-      await message.reply(`❌ Erreur lors du ban : ${err.message}`);
-    }
+      await message.reply({ embeds: [embed('#FF4444').setTitle('🔨 Utilisateur banni').addFields(
+        { name: 'Utilisateur', value: target.user.tag, inline: true },
+        { name: 'Par', value: message.author.tag, inline: true },
+        { name: 'Raison', value: reason, inline: false },
+      )] });
+    } catch (err) { await message.reply(`❌ Erreur lors du ban : ${err.message}`); }
   },
  
-  // --- TICKET ---
-  '!ticket': async (message, args) => {
-    const fullText = args.join(' ');
-    const parts = fullText.split('|').map(p => p.trim());
- 
-    if (parts.length < 2 || !parts[0] || !parts[1]) {
-      return message.reply('❌ Format : `!ticket <motif du role> | <motif de contestation>`');
-    }
- 
-    const motifRole = parts[0];
-    const motifContest = parts[1];
-    const ticketNumber = Math.floor(1000 + Math.random() * 9000);
-    const ticketName = `ticket-${ticketNumber}`;
- 
-    const guild = message.guild;
-    const viewRole = guild.roles.cache.get(CONFIG.TICKET_VIEW_ROLE_ID);
-    if (!viewRole) {
-      return message.reply('❌ Rôle de ticket introuvable. Vérifie la configuration.');
-    }
- 
-    const overwrites = [
-      {
-        id: guild.roles.everyone.id,
-        deny: [PermissionsBitField.Flags.ViewChannel],
-      },
-      {
-        id: viewRole.id,
-        allow: [PermissionsBitField.Flags.ViewChannel],
-        deny: [PermissionsBitField.Flags.SendMessages],
-      },
-      {
-        id: message.author.id,
-        allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory],
-      },
-      ...CONFIG.ADMIN_IDS.map((adminId) => ({
-        id: adminId,
-        allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory],
-      })),
-    ];
- 
-    try {
-      const channel = await guild.channels.create({
-        name: ticketName,
-        type: 0,
-        permissionOverwrites: overwrites,
-        reason: `Ouverture de ticket ${ticketNumber} par ${message.author.tag}`,
-      });
- 
-      const ticketEmbed = embed('#00FF66')
-        .setTitle(`🎫 Ticket #${ticketNumber}`)
-        .setDescription('Ticket créé avec succès. Le staff vous répondra sous 24h. En cas de mauvaise défense, un warn peut être appliqué.')
-        .addFields(
-          { name: '🧾 Ouverture par', value: `<@${message.author.id}>`, inline: true },
-          { name: '🧷 Rôle visualisation', value: `<@&${viewRole.id}>`, inline: true },
-          { name: '📌 Motif du rôle', value: motifRole, inline: false },
-          { name: '⚠️ Motif de contestation', value: motifContest, inline: false },
-          { name: '⏳ Review staff', value: '24 heures', inline: true },
-        )
-        .setFooter({ text: `ID Ticket: ${ticketNumber}` });
- 
-      await channel.send({ content: `<@${message.author.id}>`, embeds: [ticketEmbed] });
-      await message.reply(`✅ Ton ticket a été créé : ${channel}`);
-    } catch (error) {
-      console.error('Erreur création ticket:', error);
-      message.reply(`❌ Impossible de créer le ticket : ${error.message}`);
-    }
-  },
- 
-  // --- MOMMY ASMR — FIX ✅ : tableau + catch propre ---
+  // --- MOMMY ASMR ---
   '!mommy-asmr': async (message) => {
-    if (!CONFIG.MOMMY_ASMR_USER_IDS.includes(message.author.id)) {
-      return message.reply('❌ Tu n\'as pas la permission d\'utiliser cette commande.');
-    }
+    if (!CONFIG.MOMMY_ASMR_USER_IDS.includes(message.author.id)) return message.reply('❌ Tu n\'as pas la permission d\'utiliser cette commande.');
     try {
-      await message.channel.send({
-        content: '🎧 Mommy ASMR en approche...',
-        files: [CONFIG.MOMMY_ASMR_FILE_URL],
-      });
-    } catch (err) {
-      await message.reply(`❌ Échec envoi ASMR : ${err.message}`);
-    }
+      await message.channel.send({ content: '🎧 Mommy ASMR en approche...', files: [CONFIG.MOMMY_ASMR_FILE_URL] });
+    } catch (err) { await message.reply(`❌ Échec envoi ASMR : ${err.message}`); }
   },
 };
  
@@ -440,15 +563,11 @@ client.on('messageCreate', async (message) => {
     return;
   }
  
-  // Règle dynamique : !regle1, !regle2, ...
   const ruleMatch = cmd.match(/^!regle(\d+)$/);
   if (ruleMatch) {
     const num = ruleMatch[1];
     if (rulesData[num]) {
-      const e = embed('#FAD961')
-        .setTitle(`📜 Règle ${num}`)
-        .setDescription(rulesData[num]);
-      await message.reply({ embeds: [e] });
+      await message.reply({ embeds: [embed('#FAD961').setTitle(`📜 Règle ${num}`).setDescription(rulesData[num])] });
     } else {
       await message.reply(`❌ La règle **${num}** n'existe pas. Utilisez \`!regles\` pour voir toutes les règles.`);
     }
@@ -457,76 +576,77 @@ client.on('messageCreate', async (message) => {
 });
  
 // ============================================================
-//  🎭  REACTION ROLE
+//  🎭  REACTION ROLES (simple + multi)
 // ============================================================
  
 client.on('messageReactionAdd', async (reaction, user) => {
   if (user.bot) return;
+  if (reaction.partial) { try { await reaction.fetch(); } catch { return; } }
+  if (reaction.message.partial) { try { await reaction.message.fetch(); } catch { return; } }
  
-  if (reaction.partial) {
-    try { await reaction.fetch(); } catch { return; }
-  }
-  if (reaction.message.partial) {
-    try { await reaction.message.fetch(); } catch { return; }
-  }
+  const msgId = reaction.message.id;
+  const emojiName = reaction.emoji.name;
  
+  // Reaction role simple (vérification)
   const { MESSAGE_ID, CHANNEL_ID, ROLE_ID, EMOJI } = CONFIG.REACTION_ROLE;
- 
-  if (
-    reaction.message.id !== MESSAGE_ID ||
-    reaction.message.channel.id !== CHANNEL_ID ||
-    reaction.emoji.name !== EMOJI
-  ) return;
- 
-  try {
-    const guild = reaction.message.guild;
-    const member = await guild.members.fetch(user.id);
-    const role = guild.roles.cache.get(ROLE_ID);
- 
-    if (!role) return console.error('[REACTION ROLE] Rôle introuvable :', ROLE_ID);
- 
-    await member.roles.add(role);
-    console.log(`[REACTION ROLE] Rôle "${role.name}" donné à ${user.tag}`);
- 
+  if (msgId === MESSAGE_ID && reaction.message.channel.id === CHANNEL_ID && emojiName === EMOJI) {
     try {
-      await user.send('✅ Tu as bien reçu l\'accès au serveur ! Bienvenue 🎉');
-    } catch {
-      // DMs fermés, on ignore
-    }
-  } catch (err) {
-    console.error('[REACTION ROLE] Erreur ajout rôle :', err.message);
+      const member = await reaction.message.guild.members.fetch(user.id);
+      const role = reaction.message.guild.roles.cache.get(ROLE_ID);
+      if (!role) return console.error('[REACTION ROLE] Rôle introuvable :', ROLE_ID);
+      await member.roles.add(role);
+      console.log(`[REACTION ROLE] Rôle "${role.name}" donné à ${user.tag}`);
+      try { await user.send('✅ Tu as bien reçu l\'accès au serveur ! Bienvenue 🎉'); } catch {}
+    } catch (err) { console.error('[REACTION ROLE] Erreur :', err.message); }
+    return;
+  }
+ 
+  // Multi-reaction roles
+  if (reactionRolesData[msgId]) {
+    const roleId = reactionRolesData[msgId].roles[emojiName];
+    if (!roleId) return;
+    try {
+      const member = await reaction.message.guild.members.fetch(user.id);
+      const role = reaction.message.guild.roles.cache.get(roleId);
+      if (!role) return console.error(`[MULTI-RR] Rôle introuvable : ${roleId}`);
+      await member.roles.add(role);
+      console.log(`[MULTI-RR] Rôle "${role.name}" donné à ${user.tag}`);
+    } catch (err) { console.error('[MULTI-RR] Erreur ajout rôle :', err.message); }
   }
 });
  
 client.on('messageReactionRemove', async (reaction, user) => {
   if (user.bot) return;
+  if (reaction.partial) { try { await reaction.fetch(); } catch { return; } }
+  if (reaction.message.partial) { try { await reaction.message.fetch(); } catch { return; } }
  
-  if (reaction.partial) {
-    try { await reaction.fetch(); } catch { return; }
-  }
-  if (reaction.message.partial) {
-    try { await reaction.message.fetch(); } catch { return; }
-  }
+  const msgId = reaction.message.id;
+  const emojiName = reaction.emoji.name;
  
+  // Reaction role simple (vérification)
   const { MESSAGE_ID, CHANNEL_ID, ROLE_ID, EMOJI } = CONFIG.REACTION_ROLE;
+  if (msgId === MESSAGE_ID && reaction.message.channel.id === CHANNEL_ID && emojiName === EMOJI) {
+    try {
+      const member = await reaction.message.guild.members.fetch(user.id);
+      const role = reaction.message.guild.roles.cache.get(ROLE_ID);
+      if (!role) return;
+      await member.roles.remove(role);
+      console.log(`[REACTION ROLE] Rôle "${role.name}" retiré à ${user.tag}`);
+    } catch (err) { console.error('[REACTION ROLE] Erreur :', err.message); }
+    return;
+  }
  
-  if (
-    reaction.message.id !== MESSAGE_ID ||
-    reaction.message.channel.id !== CHANNEL_ID ||
-    reaction.emoji.name !== EMOJI
-  ) return;
- 
-  try {
-    const guild = reaction.message.guild;
-    const member = await guild.members.fetch(user.id);
-    const role = guild.roles.cache.get(ROLE_ID);
- 
-    if (!role) return;
- 
-    await member.roles.remove(role);
-    console.log(`[REACTION ROLE] Rôle "${role.name}" retiré à ${user.tag}`);
-  } catch (err) {
-    console.error('[REACTION ROLE] Erreur retrait rôle :', err.message);
+  // Multi-reaction roles
+  if (reactionRolesData[msgId]) {
+    const roleId = reactionRolesData[msgId].roles[emojiName];
+    if (!roleId) return;
+    try {
+      const member = await reaction.message.guild.members.fetch(user.id);
+      const role = reaction.message.guild.roles.cache.get(roleId);
+      if (!role) return;
+      await member.roles.remove(role);
+      console.log(`[MULTI-RR] Rôle "${role.name}" retiré à ${user.tag}`);
+    } catch (err) { console.error('[MULTI-RR] Erreur retrait rôle :', err.message); }
   }
 });
  
@@ -536,51 +656,38 @@ client.on('messageReactionRemove', async (reaction, user) => {
  
 async function checkTikTokLive() {
   try {
-    const url = `https://www.tiktok.com/@${CONFIG.TIKTOK_USERNAME}/live`;
-    const response = await axios.get(url, {
+    const response = await axios.get(`https://www.tiktok.com/@${CONFIG.TIKTOK_USERNAME}/live`, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept-Language': 'fr-FR,fr;q=0.9',
       },
       timeout: 10000,
     });
- 
     const html = response.data;
     const isCurrentlyLive = (
       html.includes('"statusStr":"LIVE_STATUS_STREAMING"') ||
       html.includes('"liveRoomInfo"') && html.includes('"status":2') ||
       html.includes('isLiveStreaming":true')
     );
- 
     const channel = client.channels.cache.get(CONFIG.LIVE_CHANNEL_ID);
     if (!channel) return;
- 
     if (isCurrentlyLive && !liveStatus.isLive) {
       liveStatus.isLive = true;
       liveStatus.lastNotified = new Date().toISOString();
       saveJSON(FILES.liveStatus, liveStatus);
- 
-      const e = embed('#FF0050')
-        .setTitle('🔴 LIVE EN COURS !')
-        .setDescription(`**@${CONFIG.TIKTOK_USERNAME}** est en live sur TikTok !`)
+      const e = embed('#FF0050').setTitle('🔴 LIVE EN COURS !').setDescription(`**@${CONFIG.TIKTOK_USERNAME}** est en live sur TikTok !`)
         .addFields({ name: '🔗 Rejoindre', value: `https://www.tiktok.com/@${CONFIG.TIKTOK_USERNAME}/live`, inline: false })
         .setFooter({ text: 'TikTok Live Detector' });
- 
       await channel.send({ content: '@everyone 🔴 Un live vient de démarrer !', embeds: [e] });
       console.log(`[LIVE] @${CONFIG.TIKTOK_USERNAME} est en live.`);
- 
     } else if (!isCurrentlyLive && liveStatus.isLive) {
       liveStatus.isLive = false;
       saveJSON(FILES.liveStatus, liveStatus);
       console.log(`[LIVE] @${CONFIG.TIKTOK_USERNAME} a terminé son live.`);
     }
- 
   } catch (err) {
-    if (err.response?.status === 429) {
-      console.warn('[LIVE] Rate limit TikTok, nouvelle tentative plus tard.');
-    } else {
-      console.error('[LIVE] Erreur vérification TikTok:', err.message);
-    }
+    if (err.response?.status === 429) console.warn('[LIVE] Rate limit TikTok.');
+    else console.error('[LIVE] Erreur vérification TikTok:', err.message);
   }
 }
  
@@ -593,7 +700,9 @@ client.once('ready', () => {
   console.log(`👑 Admins: ${CONFIG.ADMIN_IDS.join(', ')}`);
   console.log(`📺 Surveillance TikTok: @${CONFIG.TIKTOK_USERNAME}`);
   console.log(`📢 Channel live: ${CONFIG.LIVE_CHANNEL_ID}`);
- 
+  console.log(`🎭 Multi-RR chargés: ${Object.keys(reactionRolesData).length} message(s)`);
+  console.log(`🎫 Ticket viewer role: ${ticketConfig.viewRoleId || 'non défini'}`);
+  console.log(`🎫 Ticket staff role: ${ticketConfig.staffRoleId || 'non défini'}`);
   checkTikTokLive();
   setInterval(checkTikTokLive, CONFIG.LIVE_CHECK_INTERVAL);
 });
@@ -607,3 +716,4 @@ if (!TOKEN) {
 }
  
 client.login(TOKEN);
+ 
