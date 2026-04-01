@@ -97,7 +97,7 @@ let rulesData = loadJSON(FILES.rules, {
  
 let liveStatus = loadJSON(FILES.liveStatus, { isLive: false, lastNotified: null });
 let reactionRolesData = loadJSON(FILES.reactionRoles, {});
-let ticketsData = loadJSON(FILES.tickets, {}); // { channelId: { openerId, ticketNumber } }
+let ticketsData = loadJSON(FILES.tickets, {});
  
 let ticketConfig = loadJSON(FILES.ticketConfig, {
   viewRoleId: null,
@@ -127,10 +127,13 @@ function isAdmin(userId) { return CONFIG.ADMIN_IDS.includes(userId); }
 function embed(color = '#5865F2') { return new EmbedBuilder().setColor(color).setTimestamp(); }
  
 // ============================================================
-//  🔄  HELPER — Met à jour l'embed du message RR
+//  🔄  HELPER — Met à jour l'embed du message RR (uniquement si créé par le bot)
 // ============================================================
  
 async function updateRREmbed(targetMessage, rrEntry) {
+  // Ne jamais modifier un message existant qui n'a pas été créé par le bot
+  if (rrEntry.existingMessage) return;
+
   const rolesList = Object.entries(rrEntry.roles)
     .map(([emoji, roleId]) => `${emoji} — <@&${roleId}>`)
     .join('\n') || '*Aucun rôle configuré.*';
@@ -173,9 +176,10 @@ const commands = {
           `Rôle staff actuel : ${staffRoleDisplay}`,
         ].join('\n'), inline: false },
         { name: '🎭 Reaction Roles *(admin)*', value: [
-          '`!rr-setup <#channel> | <titre> | <description>`',
-          '`!rr-add <messageID> | <emoji> | <@role>`',
-          '`!rr-remove <messageID> | <emoji>`',
+          '`!rr-setup <#channel> | <titre> | <description>` — Crée un nouveau message RR',
+          '`!rr-attach <messageID> <#channel> | <titre> | <description>` — Attache les RR à un message existant',
+          '`!rr-add <messageID> | <emoji> | <@role>` — Ajoute un emoji/rôle',
+          '`!rr-remove <messageID> | <emoji>` — Retire un emoji/rôle',
           '`!rr-list` • `!rr-delete <messageID>`',
         ].join('\n'), inline: false },
         { name: '🎵 ASMR', value: '`!mommy-asmr` *(IDs autorisés)*', inline: false },
@@ -192,10 +196,8 @@ const commands = {
   '!say': async (message, args) => {
     if (!isAdmin(message.author.id)) return message.reply('❌ Permission refusée.');
 
-    // Suppression du message de commande
     try { await message.delete(); } catch {}
 
-    // Format : !say <#channel> | <titre> | <description> | [couleur] | [image_url] | [footer]
     const parts = args.join(' ').split('|').map(s => s.trim());
 
     if (parts.length < 3) {
@@ -221,7 +223,6 @@ const commands = {
     const imageUrl    = parts[4] || null;
     const footer      = parts[5] || null;
 
-    // Validation couleur hex basique
     const validColor = /^#[0-9A-Fa-f]{6}$/.test(couleur) ? couleur : '#5865F2';
 
     const sayEmbed = new EmbedBuilder()
@@ -289,7 +290,6 @@ const commands = {
   },
  
   '!ticket': async (message, args) => {
-    // Suppression du message de commande
     try { await message.delete(); } catch {}
 
     const motif = args.join(' ').trim();
@@ -354,7 +354,6 @@ const commands = {
         reason: `Ticket #${ticketNumber} ouvert par ${message.author.tag}`,
       });
 
-      // Sauvegarde du ticket pour la commande !fermer
       ticketsData[channel.id] = {
         openerId: message.author.id,
         openerTag: message.author.tag,
@@ -380,7 +379,6 @@ const commands = {
         embeds: [ticketEmbed],
       });
 
-      // Confirmation éphémère dans le salon d'origine
       const confirmMsg = await message.channel.send(`✅ Ton ticket a été créé : ${channel}`).catch(() => null);
       if (confirmMsg) setTimeout(() => confirmMsg.delete().catch(() => {}), 6000);
 
@@ -393,20 +391,17 @@ const commands = {
 
   // --- FERMER UN TICKET ---
   '!fermer': async (message) => {
-    // Suppression du message de commande
     try { await message.delete(); } catch {}
 
     const channelId = message.channel.id;
     const ticketInfo = ticketsData[channelId];
 
-    // Vérifier que ce salon est bien un ticket
     if (!ticketInfo) {
       const errMsg = await message.channel.send('❌ Cette commande ne peut être utilisée que dans un salon ticket.').catch(() => null);
       if (errMsg) setTimeout(() => errMsg.delete().catch(() => {}), 5000);
       return;
     }
 
-    // Autorisation : opener du ticket ou admin
     const canClose = isAdmin(message.author.id) || message.author.id === ticketInfo.openerId;
     if (!canClose) {
       const errMsg = await message.channel.send('❌ Seul le staff ou la personne qui a ouvert ce ticket peut le fermer.').catch(() => null);
@@ -427,7 +422,6 @@ const commands = {
 
     await message.channel.send({ embeds: [closeEmbed] }).catch(() => {});
 
-    // Suppression du ticket de la liste + suppression du salon après délai
     delete ticketsData[channelId];
     saveTickets();
 
@@ -444,6 +438,7 @@ const commands = {
   //  🎭  MULTI-REACTION ROLES — Commandes de setup
   // ============================================================
  
+  // --- Crée un nouveau message embed géré par le bot ---
   '!rr-setup': async (message, args) => {
     if (!isAdmin(message.author.id)) return message.reply('❌ Permission refusée.');
     const parts = args.join(' ').split('|').map(s => s.trim());
@@ -463,12 +458,84 @@ const commands = {
  
     const sent = await targetChannel.send({ embeds: [rrEmbed] });
  
-    reactionRolesData[sent.id] = { channelId: targetChannel.id, titre, description, roles: {} };
+    reactionRolesData[sent.id] = {
+      channelId: targetChannel.id,
+      titre,
+      description,
+      roles: {},
+      existingMessage: false,
+    };
     saveReactionRoles();
  
     await message.reply(`✅ Message de reaction role créé dans ${targetChannel} !\n📋 ID : \`${sent.id}\`\n\nAjoute des rôles avec : \`!rr-add ${sent.id} | 🔴 | @MonRole\``);
   },
- 
+
+  // --- Attache les RR à un message EXISTANT (sans le modifier) ---
+  // Format : !rr-attach <messageID> <#channel> | <titre> | <description optionnelle>
+  '!rr-attach': async (message, args) => {
+    if (!isAdmin(message.author.id)) return message.reply('❌ Permission refusée.');
+
+    const parts = args.join(' ').split('|').map(s => s.trim());
+    if (parts.length < 2) {
+      return message.reply(
+        '❌ Format : `!rr-attach <messageID> <#channel> | <titre> | <description optionnelle>`\n' +
+        'Exemple : `!rr-attach 1234567890123456789 #règles | Choisis ton rôle`'
+      );
+    }
+
+    // La partie avant le premier | contient messageID et #channel
+    const firstPartTokens = parts[0].split(/\s+/);
+    if (firstPartTokens.length < 2) {
+      return message.reply(
+        '❌ Tu dois fournir le **messageID** ET mentionner le **#channel** où se trouve le message.\n' +
+        'Exemple : `!rr-attach 1234567890123456789 #règles | Titre`'
+      );
+    }
+
+    const messageId = firstPartTokens[0];
+    const targetChannel = message.mentions.channels.first();
+    if (!targetChannel) return message.reply('❌ Mentionne le salon où se trouve le message. Exemple : `!rr-attach 1234567890 #général | Titre`');
+
+    const titre = parts[1] || 'Reaction Roles';
+    const description = parts[2] || 'Réagis pour obtenir un rôle !';
+
+    // Vérification que le message existe bien dans ce salon
+    let targetMessage;
+    try {
+      targetMessage = await targetChannel.messages.fetch(messageId);
+    } catch {
+      return message.reply(
+        `❌ Message introuvable avec l'ID \`${messageId}\` dans ${targetChannel}.\n` +
+        `Vérifie que l'ID est correct et que le message est bien dans ce salon.`
+      );
+    }
+
+    // Vérification qu'il n'est pas déjà enregistré
+    if (reactionRolesData[messageId]) {
+      return message.reply(
+        `⚠️ Ce message est déjà enregistré comme reaction role (titre : **${reactionRolesData[messageId].titre}**).\n` +
+        `Utilise \`!rr-add ${messageId} | <emoji> | @role\` pour ajouter des rôles, ou \`!rr-delete ${messageId}\` pour le réinitialiser.`
+      );
+    }
+
+    reactionRolesData[messageId] = {
+      channelId: targetChannel.id,
+      titre,
+      description,
+      roles: {},
+      existingMessage: true, // Important : empêche toute modification du message original
+    };
+    saveReactionRoles();
+
+    await message.reply(
+      `✅ Message \`${messageId}\` enregistré comme reaction role dans ${targetChannel} !\n` +
+      `📌 Titre (interne) : **${titre}**\n` +
+      `ℹ️ Le contenu du message ne sera pas modifié — seules les réactions seront ajoutées.\n\n` +
+      `Ajoute des rôles avec : \`!rr-add ${messageId} | 🔴 | @MonRole\``
+    );
+  },
+
+  // --- Ajoute un emoji + rôle sur un message RR (créé ou existant) ---
   '!rr-add': async (message, args) => {
     if (!isAdmin(message.author.id)) return message.reply('❌ Permission refusée.');
     const parts = args.join(' ').split('|').map(s => s.trim());
@@ -479,7 +546,7 @@ const commands = {
     const role = message.mentions.roles.first();
  
     if (!role) return message.reply('❌ Mentionne un rôle valide.');
-    if (!reactionRolesData[messageId]) return message.reply(`❌ Message introuvable avec l'ID \`${messageId}\`. Utilise \`!rr-list\`.`);
+    if (!reactionRolesData[messageId]) return message.reply(`❌ Message introuvable avec l'ID \`${messageId}\`. Utilise \`!rr-list\` pour voir les messages enregistrés.`);
  
     const rrEntry = reactionRolesData[messageId];
     if (rrEntry.roles[emoji]) return message.reply(`⚠️ L'emoji ${emoji} est déjà utilisé. Retire-le avec \`!rr-remove ${messageId} | ${emoji}\``);
@@ -490,7 +557,12 @@ const commands = {
       await targetMessage.react(emoji);
       rrEntry.roles[emoji] = role.id;
       saveReactionRoles();
-      await updateRREmbed(targetMessage, rrEntry);
+
+      // Met à jour l'embed uniquement si le message a été créé par le bot
+      if (!rrEntry.existingMessage) {
+        await updateRREmbed(targetMessage, rrEntry);
+      }
+
       await message.reply(`✅ ${emoji} → <@&${role.id}> ajouté !`);
     } catch (err) {
       console.error('[RR-ADD] Erreur :', err.message);
@@ -498,6 +570,7 @@ const commands = {
     }
   },
  
+  // --- Retire un emoji + rôle d'un message RR ---
   '!rr-remove': async (message, args) => {
     if (!isAdmin(message.author.id)) return message.reply('❌ Permission refusée.');
     const parts = args.join(' ').split('|').map(s => s.trim());
@@ -514,7 +587,12 @@ const commands = {
       if (reaction) await reaction.remove();
       delete reactionRolesData[messageId].roles[emoji];
       saveReactionRoles();
-      await updateRREmbed(targetMessage, reactionRolesData[messageId]);
+
+      // Met à jour l'embed uniquement si le message a été créé par le bot
+      if (!reactionRolesData[messageId].existingMessage) {
+        await updateRREmbed(targetMessage, reactionRolesData[messageId]);
+      }
+
       await message.reply(`✅ Emoji ${emoji} retiré.`);
     } catch (err) {
       console.error('[RR-REMOVE] Erreur :', err.message);
@@ -522,35 +600,61 @@ const commands = {
     }
   },
  
+  // --- Liste tous les messages RR configurés ---
   '!rr-list': async (message) => {
     if (!isAdmin(message.author.id)) return message.reply('❌ Permission refusée.');
     const entries = Object.entries(reactionRolesData);
-    if (entries.length === 0) return message.reply('ℹ️ Aucun message de reaction role configuré. Utilise `!rr-setup`.');
+    if (entries.length === 0) return message.reply('ℹ️ Aucun message de reaction role configuré. Utilise `!rr-setup` ou `!rr-attach`.');
  
     const fields = entries.map(([msgId, data]) => ({
-      name: `📌 "${data.titre}" — \`${msgId}\``,
-      value: `Channel: <#${data.channelId}>\n${Object.entries(data.roles).map(([e, r]) => `${e} → <@&${r}>`).join('\n') || '*Aucun rôle*'}`,
+      name: `${data.existingMessage ? '📎' : '🆕'} "${data.titre}" — \`${msgId}\``,
+      value: [
+        `Salon : <#${data.channelId}>`,
+        `Type : ${data.existingMessage ? 'Message existant (non modifié)' : 'Créé par le bot'}`,
+        Object.entries(data.roles).map(([e, r]) => `${e} → <@&${r}>`).join('\n') || '*Aucun rôle configuré*',
+      ].join('\n'),
       inline: false,
     }));
  
     await message.reply({ embeds: [embed('#7289DA').setTitle('🎭 Reaction Roles configurés').addFields(fields)] });
   },
  
+  // --- Supprime un message RR (supprime le message Discord si créé par le bot, sinon retire seulement les réactions) ---
   '!rr-delete': async (message, args) => {
     if (!isAdmin(message.author.id)) return message.reply('❌ Permission refusée.');
     const messageId = args[0];
     if (!messageId) return message.reply('❌ Format : `!rr-delete <messageID>`');
     if (!reactionRolesData[messageId]) return message.reply(`❌ Message introuvable avec l'ID \`${messageId}\`.`);
+
+    const rrEntry = reactionRolesData[messageId];
  
     try {
-      const targetChannel = await client.channels.fetch(reactionRolesData[messageId].channelId);
+      const targetChannel = await client.channels.fetch(rrEntry.channelId);
       const targetMessage = await targetChannel.messages.fetch(messageId);
-      await targetMessage.delete();
-    } catch { console.warn('[RR-DELETE] Message déjà supprimé.'); }
+
+      if (rrEntry.existingMessage) {
+        // Pour un message existant : on retire uniquement les réactions du bot, on ne supprime pas le message
+        for (const emoji of Object.keys(rrEntry.roles)) {
+          try {
+            const reaction = targetMessage.reactions.cache.find(r => r.emoji.name === emoji);
+            if (reaction) await reaction.users.remove(client.user.id);
+          } catch { /* réaction déjà absente */ }
+        }
+      } else {
+        // Pour un message créé par le bot : on supprime le message entier
+        await targetMessage.delete();
+      }
+    } catch {
+      console.warn('[RR-DELETE] Message introuvable ou déjà supprimé.');
+    }
  
     delete reactionRolesData[messageId];
     saveReactionRoles();
-    await message.reply(`✅ Message de reaction role \`${messageId}\` supprimé.`);
+    await message.reply(
+      rrEntry.existingMessage
+        ? `✅ Configuration RR retirée du message \`${messageId}\` (le message original a été conservé).`
+        : `✅ Message de reaction role \`${messageId}\` supprimé.`
+    );
   },
  
   // --- PUBMED ---
