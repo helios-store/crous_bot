@@ -46,6 +46,7 @@ const FILES = {
   liveStatus:    path.join(DATA_DIR, 'live_status.json'),
   reactionRoles: path.join(DATA_DIR, 'reaction_roles.json'),
   ticketConfig:  path.join(DATA_DIR, 'ticket_config.json'),
+  tickets:       path.join(DATA_DIR, 'tickets.json'),
 };
  
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -96,6 +97,7 @@ let rulesData = loadJSON(FILES.rules, {
  
 let liveStatus = loadJSON(FILES.liveStatus, { isLive: false, lastNotified: null });
 let reactionRolesData = loadJSON(FILES.reactionRoles, {});
+let ticketsData = loadJSON(FILES.tickets, {}); // { channelId: { openerId, ticketNumber } }
  
 let ticketConfig = loadJSON(FILES.ticketConfig, {
   viewRoleId: null,
@@ -104,6 +106,7 @@ let ticketConfig = loadJSON(FILES.ticketConfig, {
  
 function saveReactionRoles() { saveJSON(FILES.reactionRoles, reactionRolesData); }
 function saveTicketConfig()   { saveJSON(FILES.ticketConfig, ticketConfig); }
+function saveTickets()        { saveJSON(FILES.tickets, ticketsData); }
  
 // ============================================================
 //  🤖  CLIENT DISCORD
@@ -159,8 +162,10 @@ const commands = {
         { name: '💊 Compléments', value: '`!cope`\n`!add-cope` / `!add-interesting` / `!remove-cope` / `!remove-interesting` *(admin)*', inline: false },
         { name: '📜 Règles', value: '`!regles` • `!regle<N>` • `!set-regle <N> | <texte>` *(admin)*', inline: false },
         { name: '🔨 Modération', value: '`!ban <@user> [raison]` • `!source` • `!mk677`', inline: false },
+        { name: '📢 Annonces', value: '`!say <#channel> | <titre> | <description> | [couleur] | [image_url] | [footer]` *(admin)*', inline: false },
         { name: '🎫 Tickets', value: [
           '`!ticket <motif>` — Ouvre un ticket',
+          '`!fermer` — Ferme le ticket (dans le salon ticket)',
           '`!ticket-setrole @role` — Définit le rôle qui voit les tickets *(admin)*',
           '`!ticket-setstaff @role` — Définit le rôle staff qui peut écrire *(admin)*',
           '`!ticket-config` — Affiche la config actuelle *(admin)*',
@@ -178,6 +183,68 @@ const commands = {
       )
       .setFooter({ text: '*(admin) = Réservé aux utilisateurs autorisés' });
     await message.reply({ embeds: [e] });
+  },
+
+  // ============================================================
+  //  📢  SAY — Embed personnalisable
+  // ============================================================
+
+  '!say': async (message, args) => {
+    if (!isAdmin(message.author.id)) return message.reply('❌ Permission refusée.');
+
+    // Suppression du message de commande
+    try { await message.delete(); } catch {}
+
+    // Format : !say <#channel> | <titre> | <description> | [couleur] | [image_url] | [footer]
+    const parts = args.join(' ').split('|').map(s => s.trim());
+
+    if (parts.length < 3) {
+      try {
+        const errMsg = await message.channel.send('❌ Format : `!say <#channel> | <titre> | <description> | [couleur] | [image_url] | [footer]`\nExemple : `!say #général | 📢 Annonce | Bienvenue ! | #FF0000 | | Modération`');
+        setTimeout(() => errMsg.delete().catch(() => {}), 8000);
+      } catch {}
+      return;
+    }
+
+    const targetChannel = message.mentions.channels.first();
+    if (!targetChannel) {
+      try {
+        const errMsg = await message.channel.send('❌ Mentionne un salon valide en premier paramètre.');
+        setTimeout(() => errMsg.delete().catch(() => {}), 5000);
+      } catch {}
+      return;
+    }
+
+    const titre       = parts[1] || 'Annonce';
+    const description = parts[2] || '';
+    const couleur     = parts[3] || '#5865F2';
+    const imageUrl    = parts[4] || null;
+    const footer      = parts[5] || null;
+
+    // Validation couleur hex basique
+    const validColor = /^#[0-9A-Fa-f]{6}$/.test(couleur) ? couleur : '#5865F2';
+
+    const sayEmbed = new EmbedBuilder()
+      .setColor(validColor)
+      .setTitle(titre)
+      .setDescription(description)
+      .setTimestamp();
+
+    if (imageUrl) {
+      try { sayEmbed.setImage(imageUrl); } catch {}
+    }
+    if (footer) {
+      sayEmbed.setFooter({ text: footer });
+    }
+
+    try {
+      await targetChannel.send({ embeds: [sayEmbed] });
+    } catch (err) {
+      try {
+        const errMsg = await message.channel.send(`❌ Impossible d'envoyer dans ce salon : ${err.message}`);
+        setTimeout(() => errMsg.delete().catch(() => {}), 5000);
+      } catch {}
+    }
   },
  
   // ============================================================
@@ -222,18 +289,23 @@ const commands = {
   },
  
   '!ticket': async (message, args) => {
+    // Suppression du message de commande
+    try { await message.delete(); } catch {}
+
     const motif = args.join(' ').trim();
-    if (!motif) return message.reply('❌ Format : `!ticket <motif>`\nExemple : `!ticket Je conteste mon warn du 20/03`');
+    if (!motif) {
+      const errMsg = await message.channel.send('❌ Format : `!ticket <motif>`\nExemple : `!ticket Je conteste mon warn du 20/03`').catch(() => null);
+      if (errMsg) setTimeout(() => errMsg.delete().catch(() => {}), 6000);
+      return;
+    }
  
     const guild = message.guild;
     const ticketNumber = Math.floor(1000 + Math.random() * 9000);
  
-    // Construction des permissions
     const overwrites = [
       { id: guild.roles.everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] },
     ];
  
-    // Rôle viewer : voit mais ne peut pas écrire
     if (ticketConfig.viewRoleId) {
       const viewRole = guild.roles.cache.get(ticketConfig.viewRoleId);
       if (viewRole) {
@@ -245,7 +317,6 @@ const commands = {
       }
     }
  
-    // Rôle staff : voit et peut écrire
     if (ticketConfig.staffRoleId) {
       const staffRole = guild.roles.cache.get(ticketConfig.staffRoleId);
       if (staffRole) {
@@ -256,13 +327,11 @@ const commands = {
       }
     }
  
-    // Ouvreur du ticket : voit et peut écrire
     overwrites.push({
       id: message.author.id,
       allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory],
     });
 
-    // ✅ FIX : Admins du bot — on fetch chaque membre pour s'assurer qu'il est dans le cache
     for (const adminId of CONFIG.ADMIN_IDS) {
       try {
         const adminMember = await guild.members.fetch(adminId);
@@ -273,7 +342,6 @@ const commands = {
           });
         }
       } catch {
-        // Admin pas dans le serveur, on skip silencieusement
         console.warn(`[TICKET] Admin ${adminId} introuvable dans le serveur, ignoré.`);
       }
     }
@@ -285,12 +353,22 @@ const commands = {
         permissionOverwrites: overwrites,
         reason: `Ticket #${ticketNumber} ouvert par ${message.author.tag}`,
       });
+
+      // Sauvegarde du ticket pour la commande !fermer
+      ticketsData[channel.id] = {
+        openerId: message.author.id,
+        openerTag: message.author.tag,
+        ticketNumber,
+        motif,
+        openedAt: new Date().toISOString(),
+      };
+      saveTickets();
  
       const staffMention = ticketConfig.staffRoleId ? `<@&${ticketConfig.staffRoleId}>` : '';
  
       const ticketEmbed = embed('#00FF66')
         .setTitle(`🎫 Ticket #${ticketNumber}`)
-        .setDescription('Le staff va traiter ta demande sous 24h.')
+        .setDescription('Le staff va traiter ta demande sous 24h.\n\n> Pour fermer ce ticket, utilise la commande `!fermer`')
         .addFields(
           { name: '🧾 Ouvert par', value: `<@${message.author.id}>`, inline: true },
           { name: '📌 Motif', value: motif, inline: false },
@@ -301,12 +379,65 @@ const commands = {
         content: `<@${message.author.id}>${staffMention ? ` ${staffMention}` : ''}`,
         embeds: [ticketEmbed],
       });
- 
-      await message.reply(`✅ Ton ticket a été créé : ${channel}`);
+
+      // Confirmation éphémère dans le salon d'origine
+      const confirmMsg = await message.channel.send(`✅ Ton ticket a été créé : ${channel}`).catch(() => null);
+      if (confirmMsg) setTimeout(() => confirmMsg.delete().catch(() => {}), 6000);
+
     } catch (error) {
       console.error('Erreur création ticket:', error);
-      message.reply(`❌ Impossible de créer le ticket : ${error.message}`);
+      const errMsg = await message.channel.send(`❌ Impossible de créer le ticket : ${error.message}`).catch(() => null);
+      if (errMsg) setTimeout(() => errMsg.delete().catch(() => {}), 6000);
     }
+  },
+
+  // --- FERMER UN TICKET ---
+  '!fermer': async (message) => {
+    // Suppression du message de commande
+    try { await message.delete(); } catch {}
+
+    const channelId = message.channel.id;
+    const ticketInfo = ticketsData[channelId];
+
+    // Vérifier que ce salon est bien un ticket
+    if (!ticketInfo) {
+      const errMsg = await message.channel.send('❌ Cette commande ne peut être utilisée que dans un salon ticket.').catch(() => null);
+      if (errMsg) setTimeout(() => errMsg.delete().catch(() => {}), 5000);
+      return;
+    }
+
+    // Autorisation : opener du ticket ou admin
+    const canClose = isAdmin(message.author.id) || message.author.id === ticketInfo.openerId;
+    if (!canClose) {
+      const errMsg = await message.channel.send('❌ Seul le staff ou la personne qui a ouvert ce ticket peut le fermer.').catch(() => null);
+      if (errMsg) setTimeout(() => errMsg.delete().catch(() => {}), 5000);
+      return;
+    }
+
+    const closedBy = message.author.id;
+
+    const closeEmbed = embed('#FF4444')
+      .setTitle('🔒 Ticket fermé')
+      .setDescription(`Ce ticket a été fermé par <@${closedBy}>.\n\nLe salon sera supprimé dans **5 secondes**.`)
+      .addFields(
+        { name: '🧾 Ouvert par', value: `<@${ticketInfo.openerId}>`, inline: true },
+        { name: '📌 Motif', value: ticketInfo.motif, inline: false },
+      )
+      .setFooter({ text: `Ticket #${ticketInfo.ticketNumber}` });
+
+    await message.channel.send({ embeds: [closeEmbed] }).catch(() => {});
+
+    // Suppression du ticket de la liste + suppression du salon après délai
+    delete ticketsData[channelId];
+    saveTickets();
+
+    setTimeout(async () => {
+      try {
+        await message.channel.delete(`Ticket fermé par ${message.author.tag}`);
+      } catch (err) {
+        console.error('[FERMER] Erreur suppression salon :', err.message);
+      }
+    }, 5000);
   },
  
   // ============================================================
@@ -697,6 +828,7 @@ client.once('ready', () => {
   console.log(`🎭 Multi-RR chargés: ${Object.keys(reactionRolesData).length} message(s)`);
   console.log(`🎫 Ticket viewer role: ${ticketConfig.viewRoleId || 'non défini'}`);
   console.log(`🎫 Ticket staff role: ${ticketConfig.staffRoleId || 'non défini'}`);
+  console.log(`🎫 Tickets actifs chargés: ${Object.keys(ticketsData).length}`);
   checkTikTokLive();
   setInterval(checkTikTokLive, CONFIG.LIVE_CHECK_INTERVAL);
 });
