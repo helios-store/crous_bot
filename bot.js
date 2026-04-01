@@ -97,12 +97,9 @@ let rulesData = loadJSON(FILES.rules, {
 let liveStatus = loadJSON(FILES.liveStatus, { isLive: false, lastNotified: null });
 let reactionRolesData = loadJSON(FILES.reactionRoles, {});
  
-// Config ticket — rôle viewer sauvegardé dans un fichier JSON
-// viewRoleId  : peut voir le ticket mais pas écrire (ex: @Membres)
-// staffRoleId : peut voir ET écrire dans le ticket (ex: @Staff) — optionnel
 let ticketConfig = loadJSON(FILES.ticketConfig, {
-  viewRoleId: null,   // défini via !ticket-setrole
-  staffRoleId: null,  // défini via !ticket-setstaff (optionnel, les ADMIN_IDS peuvent toujours écrire)
+  viewRoleId: null,
+  staffRoleId: null,
 });
  
 function saveReactionRoles() { saveJSON(FILES.reactionRoles, reactionRolesData); }
@@ -187,29 +184,24 @@ const commands = {
   //  🎫  TICKETS
   // ============================================================
  
-  // Définit le rôle qui peut VOIR les tickets (mais pas écrire)
   '!ticket-setrole': async (message) => {
     if (!isAdmin(message.author.id)) return message.reply('❌ Permission refusée.');
     const role = message.mentions.roles.first();
     if (!role) return message.reply('❌ Mentionne un rôle. Exemple : `!ticket-setrole @Membres`');
- 
     ticketConfig.viewRoleId = role.id;
     saveTicketConfig();
     await message.reply(`✅ Rôle viewer des tickets défini : <@&${role.id}>\nCe rôle pourra **voir** les tickets mais pas y écrire.`);
   },
  
-  // Définit le rôle staff qui peut VOIR et ÉCRIRE dans les tickets
   '!ticket-setstaff': async (message) => {
     if (!isAdmin(message.author.id)) return message.reply('❌ Permission refusée.');
     const role = message.mentions.roles.first();
     if (!role) return message.reply('❌ Mentionne un rôle. Exemple : `!ticket-setstaff @Staff`');
- 
     ticketConfig.staffRoleId = role.id;
     saveTicketConfig();
     await message.reply(`✅ Rôle staff des tickets défini : <@&${role.id}>\nCe rôle pourra **voir et écrire** dans les tickets.`);
   },
  
-  // Affiche la config actuelle des tickets
   '!ticket-config': async (message) => {
     if (!isAdmin(message.author.id)) return message.reply('❌ Permission refusée.');
     const e = embed('#00FF66')
@@ -229,7 +221,6 @@ const commands = {
     await message.reply({ embeds: [e] });
   },
  
-  // Ouvre un ticket — commande simplifiée : !ticket <motif>
   '!ticket': async (message, args) => {
     const motif = args.join(' ').trim();
     if (!motif) return message.reply('❌ Format : `!ticket <motif>`\nExemple : `!ticket Je conteste mon warn du 20/03`');
@@ -239,7 +230,6 @@ const commands = {
  
     // Construction des permissions
     const overwrites = [
-      // @everyone ne voit pas
       { id: guild.roles.everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] },
     ];
  
@@ -271,13 +261,21 @@ const commands = {
       id: message.author.id,
       allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory],
     });
- 
-    // Admins du bot : voit et peut écrire
+
+    // ✅ FIX : Admins du bot — on fetch chaque membre pour s'assurer qu'il est dans le cache
     for (const adminId of CONFIG.ADMIN_IDS) {
-      overwrites.push({
-        id: adminId,
-        allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory],
-      });
+      try {
+        const adminMember = await guild.members.fetch(adminId);
+        if (adminMember) {
+          overwrites.push({
+            id: adminMember.id,
+            allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory],
+          });
+        }
+      } catch {
+        // Admin pas dans le serveur, on skip silencieusement
+        console.warn(`[TICKET] Admin ${adminId} introuvable dans le serveur, ignoré.`);
+      }
     }
  
     try {
@@ -587,7 +585,6 @@ client.on('messageReactionAdd', async (reaction, user) => {
   const msgId = reaction.message.id;
   const emojiName = reaction.emoji.name;
  
-  // Reaction role simple (vérification)
   const { MESSAGE_ID, CHANNEL_ID, ROLE_ID, EMOJI } = CONFIG.REACTION_ROLE;
   if (msgId === MESSAGE_ID && reaction.message.channel.id === CHANNEL_ID && emojiName === EMOJI) {
     try {
@@ -601,7 +598,6 @@ client.on('messageReactionAdd', async (reaction, user) => {
     return;
   }
  
-  // Multi-reaction roles
   if (reactionRolesData[msgId]) {
     const roleId = reactionRolesData[msgId].roles[emojiName];
     if (!roleId) return;
@@ -623,7 +619,6 @@ client.on('messageReactionRemove', async (reaction, user) => {
   const msgId = reaction.message.id;
   const emojiName = reaction.emoji.name;
  
-  // Reaction role simple (vérification)
   const { MESSAGE_ID, CHANNEL_ID, ROLE_ID, EMOJI } = CONFIG.REACTION_ROLE;
   if (msgId === MESSAGE_ID && reaction.message.channel.id === CHANNEL_ID && emojiName === EMOJI) {
     try {
@@ -636,7 +631,6 @@ client.on('messageReactionRemove', async (reaction, user) => {
     return;
   }
  
-  // Multi-reaction roles
   if (reactionRolesData[msgId]) {
     const roleId = reactionRolesData[msgId].roles[emojiName];
     if (!roleId) return;
@@ -716,4 +710,3 @@ if (!TOKEN) {
 }
  
 client.login(TOKEN);
- 
