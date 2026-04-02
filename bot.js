@@ -23,7 +23,7 @@ const CONFIG = {
   PREFIX: '!',
  
   MOMMY_ASMR_USER_IDS: ['1469795368580677717', '535857300552810526'],
-  MOMMY_ASMR_FILE_URL: 'https://cdn.discordapp.com/attachments/817794666778460160/1488669778313875606/ScreenRecording_03-20-2026_22-35-55_1.mp3?ex=69cd9f45&is=69cc4dc5&hm=23794ca2a2df4bb6ea4165d69675a442729720e01dd8abf70f1793270e97be2c&',
+  MOMMY_ASMR_FILE_URL: 'https://image2url.com/r2/default/audio/1775167126789-12d55369-adb5-4c88-8e88-58eb4a3d6d07.mp3',
  
   // Reaction role simple (vérification)
   REACTION_ROLE: {
