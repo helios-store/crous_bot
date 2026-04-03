@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, EmbedBuilder, PermissionsBitField, Partials } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, PermissionsBitField, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
@@ -34,9 +34,13 @@ const CONFIG = {
   },
 
   // Jail
-  JAIL_ACCESS_ROLE_ID: '1487674672865611806',
+  JAIL_ACCESS_ROLE_ID: '1487674672865611806',   // Rôle de base (conservé pour compat.)
   JAIL_PRISON_CHANNEL_ID: '1489385660979872005',
   JAIL_DURATION_MS: 5 * 60 * 1000,
+
+  // Rôles à ne JAMAIS retirer lors d'un jail (IDs Discord à renseigner si besoin)
+  // Par défaut : vide = on retire tout sauf @everyone
+  JAIL_PROTECTED_ROLE_IDS: [],
 };
 
 // ============================================================
@@ -57,6 +61,7 @@ const FILES = {
   sanctionLog:   path.join(DATA_DIR, 'sanction_log.json'),
   npcList:       path.join(DATA_DIR, 'npc_list.json'),
   tfList:        path.join(DATA_DIR, 'tf_list.json'),
+  tournaments:   path.join(DATA_DIR, 'tournaments.json'),
 };
 
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -105,14 +110,15 @@ let rulesData = loadJSON(FILES.rules, {
   8: "Respect du staff : Les décisions du staff doivent être respectées.",
 });
 
-let liveStatus      = loadJSON(FILES.liveStatus,    { isLive: false, lastNotified: null });
+let liveStatus        = loadJSON(FILES.liveStatus,    { isLive: false, lastNotified: null });
 let reactionRolesData = loadJSON(FILES.reactionRoles, {});
-let ticketsData     = loadJSON(FILES.tickets,        {});
-let warnsData       = loadJSON(FILES.warns,          {}); // { userId: [{ reason, by, at }] }
-let jailsData       = loadJSON(FILES.jails,          {}); // { userId: { until, hadRole, guildId } }
-let sanctionLogData = loadJSON(FILES.sanctionLog,    { channelId: null });
-let npcList         = loadJSON(FILES.npcList,        {}); // { userId: { originalNick, until } }
-let tfList          = loadJSON(FILES.tfList,         {}); // { userId: { originalNick, until } }
+let ticketsData       = loadJSON(FILES.tickets,        {});
+let warnsData         = loadJSON(FILES.warns,          {});
+let jailsData         = loadJSON(FILES.jails,          {});
+let sanctionLogData   = loadJSON(FILES.sanctionLog,    { channelId: null });
+let npcList           = loadJSON(FILES.npcList,        {});
+let tfList            = loadJSON(FILES.tfList,         {});
+let tournamentsData   = loadJSON(FILES.tournaments,    {});
 
 let ticketConfig = loadJSON(FILES.ticketConfig, {
   viewRoleId: null,
@@ -127,6 +133,7 @@ function saveJails()          { saveJSON(FILES.jails,         jailsData); }
 function saveSanctionLog()    { saveJSON(FILES.sanctionLog,   sanctionLogData); }
 function saveNpcList()        { saveJSON(FILES.npcList,       npcList); }
 function saveTfList()         { saveJSON(FILES.tfList,        tfList); }
+function saveTournaments()    { saveJSON(FILES.tournaments,   tournamentsData); }
 
 // ============================================================
 //  🤖  CLIENT DISCORD
@@ -180,21 +187,142 @@ async function updateRREmbed(targetMessage, rrEntry) {
 }
 
 // ============================================================
+//  ⛓️  JAIL HELPERS — Gestion complète des rôles
+// ============================================================
+
+/**
+ * Retire TOUS les rôles d'un membre (sauf @everyone et rôles protégés)
+ * et les sauvegarde pour restauration ultérieure.
+ * Retourne la liste des IDs de rôles retirés.
+ */
+async function jailMember(member, reason) {
+  const rolesToRemove = member.roles.cache.filter(role =>
+    role.id !== member.guild.id && // pas @everyone
+    !CONFIG.JAIL_PROTECTED_ROLE_IDS.includes(role.id) &&
+    role.managed === false // pas les rôles gérés par des intégrations
+  );
+
+  const removedRoleIds = rolesToRemove.map(r => r.id);
+
+  if (removedRoleIds.length > 0) {
+    await member.roles.remove(rolesToRemove, reason);
+  }
+
+  return removedRoleIds;
+}
+
+/**
+ * Restaure les rôles d'un membre après jail.
+ */
+async function unjailMember(member, savedRoleIds, reason) {
+  const rolesToAdd = savedRoleIds
+    .map(id => member.guild.roles.cache.get(id))
+    .filter(Boolean)
+    .filter(role => !member.roles.cache.has(role.id));
+
+  if (rolesToAdd.length > 0) {
+    await member.roles.add(rolesToAdd, reason);
+  }
+}
+
+// ============================================================
+//  🏆  TOURNOI — HELPERS
+// ============================================================
+
+/**
+ * Mélange un tableau (Fisher-Yates)
+ */
+function shuffle(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+/**
+ * Construit les paires du round courant.
+ * Si nombre impair, le dernier passe automatiquement (bye).
+ */
+function buildRound(participants) {
+  const shuffled = shuffle(participants);
+  const pairs = [];
+  for (let i = 0; i + 1 < shuffled.length; i += 2) {
+    pairs.push([shuffled[i], shuffled[i + 1]]);
+  }
+  // Bye si nombre impair
+  if (shuffled.length % 2 !== 0) {
+    pairs.push([shuffled[shuffled.length - 1], null]);
+  }
+  return pairs;
+}
+
+/**
+ * Envoie un versus interactif dans le channel du tournoi.
+ */
+async function sendVersus(channel, tournamentId, matchIndex, p1, p2) {
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`tournament_${tournamentId}_${matchIndex}_A`)
+      .setLabel('🏆 Joueur A')
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId(`tournament_${tournamentId}_${matchIndex}_B`)
+      .setLabel('🏆 Joueur B')
+      .setStyle(ButtonStyle.Danger),
+  );
+
+  const versusEmbed = embed('#FFD700')
+    .setTitle(`⚔️ VS — Match ${matchIndex + 1}`)
+    .setDescription(`Qui a le meilleur physique ?`)
+    .addFields(
+      { name: `🅰️ ${p1.username}`, value: `Soumis par <@${p1.userId}>`, inline: true },
+      { name: '⚡ VS', value: '\u200b', inline: true },
+      { name: `🅱️ ${p2.username}`, value: `Soumis par <@${p2.userId}>`, inline: true },
+    )
+    .setFooter({ text: `Tournoi #${tournamentId} — Crous choisit le gagnant` });
+
+  // Envoie les deux images côte à côte via deux messages séparés si nécessaire
+  await channel.send({
+    content: `**Match ${matchIndex + 1}** — 🅰️ **${p1.username}** vs 🅱️ **${p2.username}**`,
+  });
+
+  // Image A
+  const msgA = await channel.send({
+    content: `🅰️ **${p1.username}**`,
+    files: [p1.imageUrl],
+  }).catch(async () => {
+    return channel.send({ content: `🅰️ **${p1.username}** — (image : ${p1.imageUrl})` });
+  });
+
+  // Image B
+  await channel.send({
+    content: `🅱️ **${p2.username}**`,
+    files: [p2.imageUrl],
+  }).catch(async () => {
+    return channel.send({ content: `🅱️ **${p2.username}** — (image : ${p2.imageUrl})` });
+  });
+
+  const voteMsg = await channel.send({ embeds: [versusEmbed], components: [row] });
+  return voteMsg.id;
+}
+
+// ============================================================
 //  📚  COMMANDES
 // ============================================================
 
 const commands = {
 
   // ============================================================
-  //  📖  AIDE — VERSION REMANIÉE
+  //  📖  AIDE
   // ============================================================
 
   '!aide': async (message) => {
-    const viewRoleDisplay  = ticketConfig.viewRoleId  ? `<@&${ticketConfig.viewRoleId}>`  : '`non défini`';
-    const staffRoleDisplay = ticketConfig.staffRoleId ? `<@&${ticketConfig.staffRoleId}>` : '`non défini`';
+    const viewRoleDisplay   = ticketConfig.viewRoleId  ? `<@&${ticketConfig.viewRoleId}>`  : '`non défini`';
+    const staffRoleDisplay  = ticketConfig.staffRoleId ? `<@&${ticketConfig.staffRoleId}>` : '`non défini`';
     const logChannelDisplay = sanctionLogData.channelId ? `<#${sanctionLogData.channelId}>` : '`non défini`';
 
-    // ── Page 1 : Commandes générales ──
     const e1 = embed('#5865F2')
       .setTitle('📖  Aide — Commandes générales')
       .setDescription('Préfixe : `!` — Les commandes marquées 🔒 sont réservées aux admins.')
@@ -246,10 +374,23 @@ const commands = {
           ].join('\n'),
           inline: false,
         },
+        {
+          name: '🏆  Tournoi physique',
+          value: [
+            '`!tournoi-start <#channel-photos>` 🔒 — Lance un tournoi avec toutes les photos du salon',
+            '`!tournoi-status` 🔒 — Affiche l\'état du tournoi en cours',
+            '`!tournoi-cancel` 🔒 — Annule le tournoi en cours',
+          ].join('\n'),
+          inline: false,
+        },
+        {
+          name: '🧹  Utilitaires',
+          value: '`!clear <nombre>` 🔒 — Supprime N messages dans le salon (max 100)',
+          inline: false,
+        },
       )
       .setFooter({ text: 'Page 1 / 3 — Tape !aide2 pour la modération, !aide3 pour tickets & RR' });
 
-    // ── Page 2 : Modération ──
     const e2 = embed('#FF4444')
       .setTitle('🔨  Aide — Modération')
       .setDescription('Toutes les commandes de cette page sont réservées aux admins 🔒 sauf mention contraire.')
@@ -266,7 +407,7 @@ const commands = {
         {
           name: '⛓️  Jail',
           value: [
-            '`!jail @user` — Emprisonne un membre pendant 5 minutes',
+            '`!jail @user` — Emprisonne un membre (retire **TOUS** ses rôles pendant 5 min)',
             '`!expiredjails` — Liste les jails actifs avec temps restant',
           ].join('\n'),
           inline: false,
@@ -283,7 +424,7 @@ const commands = {
         {
           name: '📋  Logs de sanctions',
           value: [
-            `'!sanction-log <#channel>'\` 🔒 — Définit le salon de logs`,
+            `\`!sanction-log <#channel>\` 🔒 — Définit le salon de logs`,
             `Salon actuel : ${logChannelDisplay}`,
             '_Toutes les sanctions (warn, jail, ban) y sont automatiquement enregistrées._',
           ].join('\n'),
@@ -292,7 +433,6 @@ const commands = {
       )
       .setFooter({ text: 'Page 2 / 3 — Tape !aide pour les commandes générales, !aide3 pour tickets & RR' });
 
-    // ── Page 3 : Tickets & Reaction Roles ──
     const e3 = embed('#7289DA')
       .setTitle('🎫  Aide — Tickets & Reaction Roles')
       .addFields(
@@ -328,9 +468,35 @@ const commands = {
     await message.channel.send({ embeds: [e3] });
   },
 
-  // ── Alias pages ──
   '!aide2': async (message) => { await commands['!aide'](message); },
   '!aide3': async (message) => { await commands['!aide'](message); },
+
+  // ============================================================
+  //  🧹  CLEAR
+  // ============================================================
+
+  '!clear': async (message, args) => {
+    if (!isAdmin(message.author.id)) return message.reply('❌ Permission refusée.');
+    const amount = parseInt(args[0]);
+    if (isNaN(amount) || amount < 1 || amount > 100) {
+      return message.reply('❌ Spécifie un nombre entre 1 et 100. Ex : `!clear 10`');
+    }
+    try {
+      await message.delete().catch(() => {});
+      const deleted = await message.channel.bulkDelete(amount, true);
+      const confirm = await message.channel.send({
+        embeds: [embed('#00FF66')
+          .setTitle('🧹 Messages supprimés')
+          .setDescription(`**${deleted.size}** message(s) supprimé(s) par <@${message.author.id}>.`)
+          .setFooter({ text: 'Ce message disparaît dans 5 secondes.' })
+        ],
+      });
+      setTimeout(() => confirm.delete().catch(() => {}), 5000);
+    } catch (err) {
+      const errMsg = await message.channel.send(`❌ Erreur lors de la suppression : ${err.message}`).catch(() => null);
+      if (errMsg) setTimeout(() => errMsg.delete().catch(() => {}), 6000);
+    }
+  },
 
   // ============================================================
   //  📢  SAY
@@ -412,24 +578,28 @@ const commands = {
 
     // Auto-jail au 3ème warn
     if (warnCount >= 3) {
-      const accessRole = message.guild.roles.cache.get(CONFIG.JAIL_ACCESS_ROLE_ID);
       const prisonChannel = message.guild.channels.cache.get(CONFIG.JAIL_PRISON_CHANNEL_ID);
-      const hadRole = target.roles.cache.has(CONFIG.JAIL_ACCESS_ROLE_ID);
       const dureeMin = Math.round(CONFIG.JAIL_DURATION_MS / 60000);
 
       try {
-        if (hadRole && accessRole) await target.roles.remove(accessRole, 'Auto-jail (3 warns)');
+        // Retire TOUS les rôles
+        const removedRoleIds = await jailMember(target, 'Auto-jail (3 warns)');
 
         jailsData[target.id] = {
           until: Date.now() + CONFIG.JAIL_DURATION_MS,
-          hadRole,
+          savedRoleIds: removedRoleIds,
+          // Compatibilité ancienne structure
+          hadRole: removedRoleIds.includes(CONFIG.JAIL_ACCESS_ROLE_ID),
           guildId: message.guild.id,
         };
         saveJails();
 
         const autoJailEmbed = embed('#FF4444')
           .setTitle('⛓️ Jail automatique — 3 warns atteints')
-          .setDescription(`<@${target.id}> a été automatiquement emprisonné pour **${dureeMin} minutes** suite à son 3ème warn.`)
+          .setDescription(
+            `<@${target.id}> a été automatiquement emprisonné pour **${dureeMin} minutes** suite à son 3ème warn.\n` +
+            `**${removedRoleIds.length}** rôle(s) retiré(s) temporairement.`
+          )
           .setFooter({ text: 'Réfléchis à tes actes.' });
 
         await message.channel.send({ embeds: [autoJailEmbed] });
@@ -439,29 +609,31 @@ const commands = {
             content: `<@${target.id}>`,
             embeds: [embed('#FF4444')
               .setTitle('🔒 Jail automatique')
-              .setDescription(`Tu as accumulé 3 warns. Tu es emprisonné pour **${dureeMin} min**.`)
+              .setDescription(`Tu as accumulé 3 warns. Tu es emprisonné pour **${dureeMin} min**.\nTous tes rôles seront restaurés à la libération.`)
             ],
           });
         }
 
         await logSanction(message.guild, [
-          { name: '👤 Membre',  value: `<@${target.id}>`,          inline: true },
-          { name: '⏱️ Durée',  value: `${dureeMin} min`,           inline: true },
-          { name: '📌 Motif',   value: 'Auto-jail (3 warns)',       inline: false },
+          { name: '👤 Membre',         value: `<@${target.id}>`,          inline: true },
+          { name: '⏱️ Durée',         value: `${dureeMin} min`,           inline: true },
+          { name: '🎭 Rôles retirés',  value: `${removedRoleIds.length}`,  inline: true },
+          { name: '📌 Motif',          value: 'Auto-jail (3 warns)',        inline: false },
         ], `⛓️ Jail auto — ${target.user.tag}`, '#FF4444');
 
         setTimeout(async () => {
           try {
             const member = await message.guild.members.fetch(target.id).catch(() => null);
-            if (!member) return;
-            if (hadRole && accessRole && !member.roles.cache.has(CONFIG.JAIL_ACCESS_ROLE_ID)) {
-              await member.roles.add(accessRole, 'Libération automatique après jail');
+            if (!member) { delete jailsData[target.id]; saveJails(); return; }
+            const saved = jailsData[target.id];
+            if (saved?.savedRoleIds?.length > 0) {
+              await unjailMember(member, saved.savedRoleIds, 'Libération automatique après jail');
             }
             delete jailsData[target.id];
             saveJails();
             if (prisonChannel) {
               await prisonChannel.send({
-                embeds: [embed('#00FF66').setTitle('🔓 Libéré !').setDescription(`<@${target.id}> a été libéré automatiquement.`)],
+                embeds: [embed('#00FF66').setTitle('🔓 Libéré !').setDescription(`<@${target.id}> a été libéré automatiquement. Ses rôles ont été restaurés.`)],
               });
             }
           } catch (err) { console.error('[AUTO-JAIL] Erreur libération :', err.message); }
@@ -478,18 +650,13 @@ const commands = {
     if (!target) return message.reply('❌ Mentionne un utilisateur : `!warns @user`');
     const list = warnsData[target.id];
     if (!list || list.length === 0) return message.reply(`✅ <@${target.id}> n'a aucun warn.`);
-
     const fields = list.map((w, i) => ({
       name: `Warn #${i + 1} — ${new Date(w.at).toLocaleDateString('fr-FR')}`,
       value: `📌 ${w.reason}\n👮 <@${w.by}>`,
       inline: false,
     }));
-
     await message.reply({
-      embeds: [embed('#FFA500')
-        .setTitle(`⚠️ Warns de ${target.displayName} — ${list.length}/3`)
-        .addFields(fields)
-      ],
+      embeds: [embed('#FFA500').setTitle(`⚠️ Warns de ${target.displayName} — ${list.length}/3`).addFields(fields)],
     });
   },
 
@@ -501,11 +668,10 @@ const commands = {
     delete warnsData[target.id];
     saveWarns();
     await message.reply(`✅ **${before}** warn(s) supprimé(s) pour <@${target.id}>.`);
-
     await logSanction(message.guild, [
-      { name: '👤 Membre',   value: `<@${target.id}>`,          inline: true },
-      { name: '👮 Par',      value: `<@${message.author.id}>`,  inline: true },
-      { name: '🗑️ Supprimés', value: `${before} warn(s)`,      inline: true },
+      { name: '👤 Membre',    value: `<@${target.id}>`,          inline: true },
+      { name: '👮 Par',       value: `<@${message.author.id}>`,  inline: true },
+      { name: '🗑️ Supprimés', value: `${before} warn(s)`,        inline: true },
     ], `🧹 Warns effacés — ${target.user.tag}`, '#00FF66');
   },
 
@@ -517,20 +683,19 @@ const commands = {
     if (!isAdmin(message.author.id)) return message.reply('❌ Permission refusée.');
     const active = Object.entries(jailsData);
     if (active.length === 0) return message.reply('✅ Aucun jail actif en ce moment.');
-
     const now = Date.now();
     const fields = active.map(([userId, data]) => {
       const remaining = data.until - now;
       const displayTime = remaining > 0
         ? `⏱️ ${Math.ceil(remaining / 1000 / 60)} min restante(s)`
         : '⚠️ Libération en attente...';
+      const rolesCount = data.savedRoleIds?.length ?? (data.hadRole ? 1 : 0);
       return {
         name: `<@${userId}>`,
-        value: `${displayTime}\n📅 Fin : ${new Date(data.until).toLocaleTimeString('fr-FR')}`,
+        value: `${displayTime}\n📅 Fin : ${new Date(data.until).toLocaleTimeString('fr-FR')}\n🎭 ${rolesCount} rôle(s) sauvegardé(s)`,
         inline: true,
       };
     });
-
     await message.reply({
       embeds: [embed('#FF4444').setTitle(`⛓️ Jails actifs — ${active.length} membre(s)`).addFields(fields)],
     });
@@ -546,7 +711,246 @@ const commands = {
     if (!channel) return message.reply('❌ Mentionne un salon : `!sanction-log <#channel>`');
     sanctionLogData.channelId = channel.id;
     saveSanctionLog();
-    await message.reply(`✅ Salon de logs des sanctions défini : ${channel}\nToutes les sanctions (warn, jail, ban) y seront automatiquement enregistrées.`);
+    await message.reply(`✅ Salon de logs des sanctions défini : ${channel}`);
+  },
+
+  // ============================================================
+  //  🔒  JAIL
+  // ============================================================
+
+  '!jail': async (message) => {
+    if (!isAdmin(message.author.id)) return message.reply('❌ Permission refusée.');
+    const target = message.mentions.members.first();
+    if (!target) return message.reply('❌ Mentionne un utilisateur : `!jail @user`');
+    if (isAdmin(target.id)) return message.reply('❌ Tu ne peux pas emprisonner un admin.');
+
+    const prisonChannel = message.guild.channels.cache.get(CONFIG.JAIL_PRISON_CHANNEL_ID);
+    const prisonMention = prisonChannel ? `<#${CONFIG.JAIL_PRISON_CHANNEL_ID}>` : '#prison';
+    const dureeMin      = Math.round(CONFIG.JAIL_DURATION_MS / 60000);
+
+    try {
+      // Retire TOUS les rôles et les sauvegarde
+      const removedRoleIds = await jailMember(target, `Jail par ${message.author.tag}`);
+
+      jailsData[target.id] = {
+        until: Date.now() + CONFIG.JAIL_DURATION_MS,
+        savedRoleIds: removedRoleIds,
+        hadRole: removedRoleIds.includes(CONFIG.JAIL_ACCESS_ROLE_ID), // compat
+        guildId: message.guild.id,
+      };
+      saveJails();
+
+      const jailEmbed = embed('#FF4444')
+        .setTitle('⛓️ Emprisonné !')
+        .setDescription(
+          `<@${target.id}> a été envoyé en prison par <@${message.author.id}>.\n` +
+          `**${removedRoleIds.length}** rôle(s) retiré(s) — tous restaurés automatiquement dans **${dureeMin} min**.\n\n` +
+          `Seul ${prisonMention} reste accessible.`
+        )
+        .addFields(
+          { name: '👮 Par',            value: `<@${message.author.id}>`,    inline: true },
+          { name: '⏱️ Durée',         value: `${dureeMin} min`,             inline: true },
+          { name: '🎭 Rôles retirés', value: `${removedRoleIds.length}`,    inline: true },
+        )
+        .setFooter({ text: 'Réfléchis à tes actes.' });
+
+      await message.reply({ embeds: [jailEmbed] });
+
+      if (prisonChannel) {
+        await prisonChannel.send({
+          content: `<@${target.id}>`,
+          embeds: [embed('#FF4444')
+            .setTitle('🔒 Tu es en prison')
+            .setDescription(
+              `Tu as été emprisonné par <@${message.author.id}>.\n` +
+              `Tu seras libéré dans **${dureeMin} minute${dureeMin > 1 ? 's' : ''}** et tous tes rôles seront restaurés.`
+            )
+          ],
+        });
+      }
+
+      await logSanction(message.guild, [
+        { name: '👤 Membre',         value: `<@${target.id}>`,          inline: true },
+        { name: '👮 Par',            value: `<@${message.author.id}>`,  inline: true },
+        { name: '⏱️ Durée',         value: `${dureeMin} min`,           inline: true },
+        { name: '🎭 Rôles retirés', value: `${removedRoleIds.length}`,   inline: true },
+      ], `⛓️ Jail — ${target.user.tag}`, '#FF4444');
+
+      console.log(`[JAIL] ${target.user.tag} emprisonné (${removedRoleIds.length} rôles retirés) — ${dureeMin} min`);
+
+      setTimeout(async () => {
+        try {
+          const member = await message.guild.members.fetch(target.id).catch(() => null);
+          if (!member) { delete jailsData[target.id]; saveJails(); return; }
+          const saved = jailsData[target.id];
+          if (saved?.savedRoleIds?.length > 0) {
+            await unjailMember(member, saved.savedRoleIds, 'Libération automatique après jail');
+          }
+          delete jailsData[target.id];
+          saveJails();
+          if (prisonChannel) {
+            await prisonChannel.send({
+              embeds: [embed('#00FF66')
+                .setTitle('🔓 Libéré !')
+                .setDescription(`<@${target.id}> a purgé sa peine. Tous ses rôles ont été restaurés.`)
+              ],
+            });
+          }
+          console.log(`[JAIL] ${target.user.tag} libéré — rôles restaurés.`);
+        } catch (err) { console.error('[JAIL] Erreur libération :', err.message); }
+      }, CONFIG.JAIL_DURATION_MS);
+
+    } catch (err) { await message.reply(`❌ Erreur : ${err.message}`); }
+  },
+
+  // ============================================================
+  //  🏆  TOURNOI PHYSIQUE
+  // ============================================================
+
+  '!tournoi-start': async (message, args) => {
+    if (!isAdmin(message.author.id)) return message.reply('❌ Permission refusée.');
+
+    const photoChannel = message.mentions.channels.first();
+    if (!photoChannel) return message.reply('❌ Mentionne le salon photos : `!tournoi-start <#channel-photos>`');
+
+    // Vérification qu'aucun tournoi n'est déjà en cours
+    const activeTournament = Object.values(tournamentsData).find(t => t.status === 'active');
+    if (activeTournament) {
+      return message.reply(`❌ Un tournoi est déjà en cours (ID: \`${activeTournament.id}\`). Utilise \`!tournoi-cancel\` pour l'annuler.`);
+    }
+
+    await message.reply('⏳ Récupération des photos en cours...');
+
+    // Récupère tous les messages avec images du salon
+    let allMessages = [];
+    let lastId = null;
+    let fetchMore = true;
+
+    while (fetchMore) {
+      const options = { limit: 100 };
+      if (lastId) options.before = lastId;
+
+      const batch = await photoChannel.messages.fetch(options).catch(() => null);
+      if (!batch || batch.size === 0) break;
+
+      allMessages.push(...batch.values());
+      lastId = batch.last().id;
+      fetchMore = batch.size === 100;
+
+      // Sécurité : max 1000 messages scannés
+      if (allMessages.length >= 1000) break;
+    }
+
+    // Filtre les messages qui ont une image en attachment ou une image dans le contenu
+    const imageExtensions = /\.(jpg|jpeg|png|gif|webp)(\?.*)?$/i;
+    const participants = [];
+    const seenUsers = new Set();
+
+    for (const msg of allMessages) {
+      if (msg.author.bot) continue;
+
+      // Cherche une image dans les attachments
+      const imageAttachment = msg.attachments.find(att =>
+        att.contentType?.startsWith('image/') ||
+        imageExtensions.test(att.url)
+      );
+
+      if (imageAttachment && !seenUsers.has(msg.author.id)) {
+        seenUsers.add(msg.author.id);
+        participants.push({
+          userId: msg.author.id,
+          username: msg.member?.displayName || msg.author.username,
+          imageUrl: imageAttachment.url,
+          messageId: msg.id,
+        });
+      }
+    }
+
+    if (participants.length < 2) {
+      return message.reply('❌ Pas assez de participants avec des photos dans ce salon (minimum 2 requis).');
+    }
+
+    // Crée le tournoi
+    const tournamentId = Date.now().toString(36);
+    const firstRoundPairs = buildRound(participants);
+
+    tournamentsData[tournamentId] = {
+      id: tournamentId,
+      status: 'active',
+      hostChannelId: message.channel.id,
+      photoChannelId: photoChannel.id,
+      participants: participants,
+      currentRound: 1,
+      currentMatchIndex: 0,
+      currentPairs: firstRoundPairs,
+      roundWinners: [],
+      allRoundWinners: [],
+      history: [],
+      startedBy: message.author.id,
+      startedAt: new Date().toISOString(),
+      currentVoteMessageId: null,
+    };
+    saveTournaments();
+
+    // Annonce de départ
+    const startEmbed = embed('#FFD700')
+      .setTitle('🏆 Tournoi Physique — Début !')
+      .setDescription(
+        `Le tournoi démarre avec **${participants.length} participant(s)** !\n\n` +
+        `📸 Photos récupérées depuis ${photoChannel}\n` +
+        `🎯 Seule **1 photo par personne** est retenue (la plus récente).`
+      )
+      .addFields(
+        { name: '👥 Participants', value: participants.map(p => `<@${p.userId}>`).join(', ').slice(0, 1024), inline: false },
+        { name: '🔢 Matchs au 1er tour', value: `${firstRoundPairs.filter(p => p[1] !== null).length} match(s)`, inline: true },
+        { name: '🎲 Format', value: 'Élimination directe', inline: true },
+      )
+      .setFooter({ text: `Tournoi #${tournamentId} — Lancé par ${message.author.tag}` });
+
+    await message.channel.send({ embeds: [startEmbed] });
+
+    // Premier match — ou bye si pair unique
+    await advanceTournament(tournamentId, message.channel);
+  },
+
+  '!tournoi-status': async (message) => {
+    if (!isAdmin(message.author.id)) return message.reply('❌ Permission refusée.');
+
+    const activeTournament = Object.values(tournamentsData).find(t => t.status === 'active');
+    if (!activeTournament) return message.reply('ℹ️ Aucun tournoi en cours.');
+
+    const t = activeTournament;
+    const totalMatches = t.currentPairs.filter(p => p[1] !== null).length;
+    const doneMatches = t.currentMatchIndex;
+
+    const statusEmbed = embed('#FFD700')
+      .setTitle(`🏆 Tournoi #${t.id} — Round ${t.currentRound}`)
+      .addFields(
+        { name: '📊 Progression',     value: `Match ${doneMatches}/${totalMatches}`,                     inline: true },
+        { name: '👥 Participants',    value: `${t.participants.length}`,                                 inline: true },
+        { name: '🏅 Qualifiés (R${t.currentRound})', value: `${t.roundWinners.length}`,                inline: true },
+        { name: '🎯 Lancé par',       value: `<@${t.startedBy}>`,                                       inline: true },
+        { name: '📅 Démarré le',      value: new Date(t.startedAt).toLocaleString('fr-FR'),             inline: true },
+      );
+
+    await message.reply({ embeds: [statusEmbed] });
+  },
+
+  '!tournoi-cancel': async (message) => {
+    if (!isAdmin(message.author.id)) return message.reply('❌ Permission refusée.');
+
+    const activeTournament = Object.values(tournamentsData).find(t => t.status === 'active');
+    if (!activeTournament) return message.reply('ℹ️ Aucun tournoi en cours.');
+
+    activeTournament.status = 'cancelled';
+    saveTournaments();
+
+    await message.reply({
+      embeds: [embed('#FF4444')
+        .setTitle('🚫 Tournoi annulé')
+        .setDescription(`Le tournoi #${activeTournament.id} a été annulé par <@${message.author.id}>.`)
+      ],
+    });
   },
 
   // ============================================================
@@ -570,12 +974,7 @@ const commands = {
 
     try {
       await target.setNickname(newNick, `NPC par ${message.author.tag}`);
-
-      npcList[target.id] = {
-        originalNick,
-        until: Date.now() + NPC_DURATION_MS,
-        guildId: message.guild.id,
-      };
+      npcList[target.id] = { originalNick, until: Date.now() + NPC_DURATION_MS, guildId: message.guild.id };
       saveNpcList();
 
       const npcEmbed = embed('#95A5A6')
@@ -594,9 +993,9 @@ const commands = {
       await message.reply({ embeds: [npcEmbed] });
 
       await logSanction(message.guild, [
-        { name: '👤 Membre',  value: `<@${target.id}>`,          inline: true },
-        { name: '👮 Par',     value: `<@${message.author.id}>`,  inline: true },
-        { name: '⏱️ Durée',  value: `${dureeMin} min`,           inline: true },
+        { name: '👤 Membre', value: `<@${target.id}>`,          inline: true },
+        { name: '👮 Par',    value: `<@${message.author.id}>`,  inline: true },
+        { name: '⏱️ Durée', value: `${dureeMin} min`,           inline: true },
       ], `🤖 NPC — ${target.user.tag}`, '#95A5A6');
 
       setTimeout(async () => {
@@ -608,13 +1007,10 @@ const commands = {
           await member.setNickname(restore, 'Fin du statut NPC');
           delete npcList[target.id];
           saveNpcList();
-          console.log(`[NPC] ${target.user.tag} — statut NPC retiré.`);
         } catch (err) { console.error('[NPC] Erreur restauration pseudo :', err.message); }
       }, NPC_DURATION_MS);
 
-    } catch (err) {
-      await message.reply(`❌ Erreur : ${err.message}`);
-    }
+    } catch (err) { await message.reply(`❌ Erreur : ${err.message}`); }
   },
 
   // ============================================================
@@ -629,28 +1025,23 @@ const commands = {
     try {
       const oldNick = target.nickname || '*aucun surnom*';
       await target.setNickname(null, `Reset pseudo par ${message.author.tag}`);
-
-      // Nettoyage des données NPC/TF si présentes
       if (npcList[target.id]) { delete npcList[target.id]; saveNpcList(); }
       if (tfList[target.id])  { delete tfList[target.id];  saveTfList();  }
-
       await message.reply({
         embeds: [embed('#00FF66')
           .setTitle('🔄 Pseudo réinitialisé')
           .addFields(
-            { name: '👤 Membre',      value: `<@${target.id}>`,          inline: true },
-            { name: '📛 Ancien pseudo', value: oldNick,                  inline: true },
-            { name: '👮 Par',          value: `<@${message.author.id}>`, inline: true },
+            { name: '👤 Membre',        value: `<@${target.id}>`,          inline: true },
+            { name: '📛 Ancien pseudo', value: oldNick,                     inline: true },
+            { name: '👮 Par',           value: `<@${message.author.id}>`,  inline: true },
           )
         ],
       });
-    } catch (err) {
-      await message.reply(`❌ Erreur : ${err.message}`);
-    }
+    } catch (err) { await message.reply(`❌ Erreur : ${err.message}`); }
   },
 
   // ============================================================
-  //  🎭  TF (Transform / Rename troll)
+  //  🎭  TF
   // ============================================================
 
   '!tf': async (message) => {
@@ -662,53 +1053,37 @@ const commands = {
     const TF_DURATION_MS = 10 * 60 * 1000;
     const dureeMin = Math.round(TF_DURATION_MS / 60000);
     const originalNick = target.nickname || target.user.username;
-
     const tfNames = [
-      'Le Copeur Certifié',
-      'M. Fluide 2024',
-      'Natty Suspect #1',
-      'Le Roi du Fenugrec',
-      'Monsieur Maingain',
-      'Le Bulk Éternel',
-      'Prince du Cope',
-      'IQ Test Échoué',
-      'Fonte Imaginaire',
-      'Background NPC',
-      'Zyzz Raté',
-      'Le Sourceur',
-      'Hgh Anonymous',
-      'Mr. Overdose Créatine',
-      'Amateur de MK677',
+      'Le Copeur Certifié', 'M. Fluide 2024', 'Natty Suspect #1',
+      'Le Roi du Fenugrec', 'Monsieur Maingain', 'Le Bulk Éternel',
+      'Prince du Cope', 'IQ Test Échoué', 'Fonte Imaginaire',
+      'Background NPC', 'Zyzz Raté', 'Le Sourceur',
+      'Hgh Anonymous', 'Mr. Overdose Créatine', 'Amateur de MK677',
     ];
     const newNick = tfNames[Math.floor(Math.random() * tfNames.length)];
 
     try {
       await target.setNickname(newNick, `TF par ${message.author.tag}`);
-
-      tfList[target.id] = {
-        originalNick,
-        until: Date.now() + TF_DURATION_MS,
-        guildId: message.guild.id,
-      };
+      tfList[target.id] = { originalNick, until: Date.now() + TF_DURATION_MS, guildId: message.guild.id };
       saveTfList();
 
       const tfEmbed = embed('#9B59B6')
         .setTitle('🎭 Transformation activée')
         .setDescription(`<@${target.id}> a été transformé pour **${dureeMin} minutes**.`)
         .addFields(
-          { name: '📛 Ancien pseudo',  value: originalNick,               inline: true },
-          { name: '🎭 Nouveau pseudo', value: newNick,                    inline: true },
-          { name: '👮 Par',            value: `<@${message.author.id}>`,  inline: true },
-          { name: '⏱️ Durée',         value: `${dureeMin} min`,           inline: true },
+          { name: '📛 Ancien pseudo',  value: originalNick,              inline: true },
+          { name: '🎭 Nouveau pseudo', value: newNick,                   inline: true },
+          { name: '👮 Par',            value: `<@${message.author.id}>`, inline: true },
+          { name: '⏱️ Durée',         value: `${dureeMin} min`,          inline: true },
         )
         .setFooter({ text: 'TF Mode™ — Identité temporairement confisquée.' });
 
       await message.reply({ embeds: [tfEmbed] });
 
       await logSanction(message.guild, [
-        { name: '👤 Membre',          value: `<@${target.id}>`,          inline: true },
-        { name: '🎭 Nouveau pseudo',  value: newNick,                    inline: true },
-        { name: '👮 Par',             value: `<@${message.author.id}>`,  inline: true },
+        { name: '👤 Membre',         value: `<@${target.id}>`,          inline: true },
+        { name: '🎭 Nouveau pseudo', value: newNick,                    inline: true },
+        { name: '👮 Par',            value: `<@${message.author.id}>`,  inline: true },
       ], `🎭 TF — ${target.user.tag}`, '#9B59B6');
 
       setTimeout(async () => {
@@ -720,13 +1095,10 @@ const commands = {
           await member.setNickname(restore, 'Fin du TF');
           delete tfList[target.id];
           saveTfList();
-          console.log(`[TF] ${target.user.tag} — pseudo restauré.`);
         } catch (err) { console.error('[TF] Erreur restauration pseudo :', err.message); }
       }, TF_DURATION_MS);
 
-    } catch (err) {
-      await message.reply(`❌ Erreur : ${err.message}`);
-    }
+    } catch (err) { await message.reply(`❌ Erreur : ${err.message}`); }
   },
 
   // ============================================================
@@ -962,9 +1334,9 @@ const commands = {
 
   '!pubmed': async (message) => {
     const fields = [{ name: '📄 Titre', value: studyData.title || 'Non défini', inline: false }];
-    if (studyData.url)   fields.push({ name: '🔗 Lien',        value: studyData.url,              inline: false });
-    if (studyData.setBy) fields.push({ name: '👤 Définie par', value: `<@${studyData.setBy}>`,    inline: true  });
-    if (studyData.setAt) fields.push({ name: '📅 Date',        value: studyData.setAt,            inline: true  });
+    if (studyData.url)   fields.push({ name: '🔗 Lien',        value: studyData.url,           inline: false });
+    if (studyData.setBy) fields.push({ name: '👤 Définie par', value: `<@${studyData.setBy}>`, inline: true  });
+    if (studyData.setAt) fields.push({ name: '📅 Date',        value: studyData.setAt,         inline: true  });
     await message.reply({ embeds: [embed('#00B5D8').setTitle('🔬 Dernière étude partagée').setDescription(studyData.description || 'Aucune description.').addFields(fields)] });
   },
 
@@ -1077,72 +1449,40 @@ const commands = {
         { name: 'Raison',      value: reason,             inline: false },
       )] });
       await logSanction(message.guild, [
-        { name: '👤 Membre',  value: target.user.tag,          inline: true },
-        { name: '👮 Par',     value: `<@${message.author.id}>`, inline: true },
-        { name: '📌 Raison',  value: reason,                   inline: false },
+        { name: '👤 Membre', value: target.user.tag,           inline: true },
+        { name: '👮 Par',    value: `<@${message.author.id}>`, inline: true },
+        { name: '📌 Raison', value: reason,                    inline: false },
       ], `🔨 Ban — ${target.user.tag}`, '#FF0000');
     } catch (err) { await message.reply(`❌ Erreur lors du ban : ${err.message}`); }
   },
 
   // ============================================================
-  //  🔒  JAIL
+  //  🌊  FLUIDE
   // ============================================================
 
-  '!jail': async (message) => {
+  '!fluide': async (message) => {
     if (!isAdmin(message.author.id)) return message.reply('❌ Permission refusée.');
     const target = message.mentions.members.first();
-    if (!target) return message.reply('❌ Mentionne un utilisateur : `!jail @user`');
-    if (isAdmin(target.id)) return message.reply('❌ Tu ne peux pas emprisonner un admin.');
-
-    const accessRole    = message.guild.roles.cache.get(CONFIG.JAIL_ACCESS_ROLE_ID);
-    if (!accessRole)    return message.reply('❌ Rôle d\'accès introuvable (vérifie JAIL_ACCESS_ROLE_ID).');
-    const prisonChannel = message.guild.channels.cache.get(CONFIG.JAIL_PRISON_CHANNEL_ID);
-    const prisonMention = prisonChannel ? `<#${CONFIG.JAIL_PRISON_CHANNEL_ID}>` : '#prison';
-    const hadRole       = target.roles.cache.has(CONFIG.JAIL_ACCESS_ROLE_ID);
-    const dureeMin      = Math.round(CONFIG.JAIL_DURATION_MS / 60000);
-
-    try {
-      if (hadRole) await target.roles.remove(accessRole, `Jail par ${message.author.tag}`);
-
-      jailsData[target.id] = { until: Date.now() + CONFIG.JAIL_DURATION_MS, hadRole, guildId: message.guild.id };
-      saveJails();
-
-      const jailEmbed = embed('#FF4444')
-        .setTitle('⛓️ Emprisonné !')
-        .setDescription(`<@${target.id}> a été envoyé en prison par <@${message.author.id}>.\nAccès au serveur retiré. Seul ${prisonMention} reste visible.\n\n**Libération automatique dans ${dureeMin} minute${dureeMin > 1 ? 's' : ''}.**`)
-        .addFields({ name: '👮 Par', value: `<@${message.author.id}>`, inline: true }, { name: '⏱️ Durée', value: `${dureeMin} min`, inline: true })
-        .setFooter({ text: 'Réfléchis à tes actes.' });
-      await message.reply({ embeds: [jailEmbed] });
-
-      if (prisonChannel) {
-        await prisonChannel.send({ content: `<@${target.id}>`, embeds: [embed('#FF4444').setTitle('🔒 Tu es en prison').setDescription(`Tu as été emprisonné par <@${message.author.id}>.\nTu seras libéré dans **${dureeMin} minute${dureeMin > 1 ? 's' : ''}**.`)] });
-      }
-
-      await logSanction(message.guild, [
-        { name: '👤 Membre',  value: `<@${target.id}>`,          inline: true },
-        { name: '👮 Par',     value: `<@${message.author.id}>`,  inline: true },
-        { name: '⏱️ Durée',  value: `${dureeMin} min`,           inline: true },
-      ], `⛓️ Jail — ${target.user.tag}`, '#FF4444');
-
-      console.log(`[JAIL] ${target.user.tag} emprisonné par ${message.author.tag} (${dureeMin} min)`);
-
-      setTimeout(async () => {
-        try {
-          const member = await message.guild.members.fetch(target.id).catch(() => null);
-          if (!member) { delete jailsData[target.id]; saveJails(); return; }
-          if (hadRole && !member.roles.cache.has(CONFIG.JAIL_ACCESS_ROLE_ID)) {
-            await member.roles.add(accessRole, 'Libération automatique après jail');
-          }
-          delete jailsData[target.id];
-          saveJails();
-          if (prisonChannel) {
-            await prisonChannel.send({ embeds: [embed('#00FF66').setTitle('🔓 Libéré !').setDescription(`<@${target.id}> a purgé sa peine et retrouve l'accès au serveur.`)] });
-          }
-          console.log(`[JAIL] ${target.user.tag} libéré automatiquement.`);
-        } catch (err) { console.error('[JAIL] Erreur libération :', err.message); }
-      }, CONFIG.JAIL_DURATION_MS);
-
-    } catch (err) { await message.reply(`❌ Erreur : ${err.message}`); }
+    if (!target) return message.reply('❌ Mentionne un utilisateur : `!fluide @user`');
+    const motifs = [
+      'comportement inexplicable détecté', 'neurones dysfonctionnels confirmés',
+      'cohérence logique introuvable', 'ratio subi sans broncher',
+      'a défendu un cope en public', 'a demandé une source',
+      'a mentionné le MK-677 volontairement', 'analyse biométrique : QI fluide détecté',
+      'a pris du fenugrec en pensant que ça servait à quelque chose',
+      'a confondu créatine et stéroïdes pour la 3ème fois',
+    ];
+    const motif = motifs[Math.floor(Math.random() * motifs.length)];
+    await message.reply({ embeds: [embed('#9B59B6')
+      .setTitle('🌊 Système Fluide Activé')
+      .setDescription(`<@${target.id}> est officiellement passé sous **système fluide** pour les prochaines **24h**.\n\nConformément à la règle 3, les insultes et ratios à son encontre sont désormais **autorisés et encouragés**.`)
+      .addFields(
+        { name: '📋 Motif détecté', value: motif,                                 inline: false },
+        { name: '⚠️ Statut',        value: 'FLUIDE — Protection sociale retirée', inline: true  },
+        { name: '⏱️ Durée estimée', value: '24h (ou jusqu\'à guérison)',          inline: true  },
+      )
+      .setFooter({ text: `Décision prise par ${message.author.displayName} • Système Fluide™` })
+    ] });
   },
 
   // ============================================================
@@ -1161,9 +1501,9 @@ const commands = {
     else if (iq >= 60)  { verdict = '💀 Cliniquement préoccupant. Consulte.';                      color = '#FF4444'; }
     else                { verdict = '🪨 Roche. Tu es une roche.';                                  color = '#FF0000'; }
     await message.reply({ embeds: [embed(color).setTitle(`🧠 Résultat IQ — ${target.displayName}`).addFields(
-      { name: 'Score officiel', value: `**${iq} points**`,                              inline: true  },
+      { name: 'Score officiel', value: `**${iq} points**`,                               inline: true  },
       { name: 'Percentile',     value: `Top ${Math.max(1, 100 - Math.floor(iq / 2))}%`, inline: true  },
-      { name: 'Verdict',        value: verdict,                                          inline: false },
+      { name: 'Verdict',        value: verdict,                                           inline: false },
     ).setFooter({ text: 'Certifié par l\'Institut International du Cerveau Fluide™' })] });
   },
 
@@ -1188,38 +1528,9 @@ const commands = {
     ];
     const refutation = refutations[Math.floor(Math.random() * refutations.length)];
     await message.reply({ embeds: [embed('#FF6B6B').setTitle('💊 Cope du jour').addFields(
-      { name: '🎯 Produit du jour',    value: `**${random}**`, inline: false },
-      { name: '🔬 Avis scientifique',  value: refutation,      inline: false },
+      { name: '🎯 Produit du jour',   value: `**${random}**`, inline: false },
+      { name: '🔬 Avis scientifique', value: refutation,      inline: false },
     ).setFooter({ text: 'Basé sur des données solides. Très solides. Bétonnées.' })] });
-  },
-
-  // ============================================================
-  //  🌊  FLUIDE
-  // ============================================================
-
-  '!fluide': async (message) => {
-    if (!isAdmin(message.author.id)) return message.reply('❌ Permission refusée.');
-    const target = message.mentions.members.first();
-    if (!target) return message.reply('❌ Mentionne un utilisateur : `!fluide @user`');
-    const motifs = [
-      'comportement inexplicable détecté', 'neurones dysfonctionnels confirmés',
-      'cohérence logique introuvable', 'ratio subi sans broncher',
-      'a défendu un cope en public', 'a demandé une source',
-      'a mentionné le MK-677 volontairement', 'analyse biométrique : QI fluide détecté',
-      'a pris du fenugrec en pensant que ça servait à quelque chose',
-      'a confondu créatine et stéroïdes pour la 3ème fois',
-    ];
-    const motif = motifs[Math.floor(Math.random() * motifs.length)];
-    await message.reply({ embeds: [embed('#9B59B6')
-      .setTitle('🌊 Système Fluide Activé')
-      .setDescription(`<@${target.id}> est officiellement passé sous **système fluide** pour les prochaines **24h**.\n\nConformément à la règle 3, les insultes et ratios à son encontre sont désormais **autorisés et encouragés**.`)
-      .addFields(
-        { name: '📋 Motif détecté', value: motif,                                   inline: false },
-        { name: '⚠️ Statut',        value: 'FLUIDE — Protection sociale retirée',   inline: true  },
-        { name: '⏱️ Durée estimée', value: '24h (ou jusqu\'à guérison)',            inline: true  },
-      )
-      .setFooter({ text: `Décision prise par ${message.author.displayName} • Système Fluide™` })
-    ] });
   },
 
   // ============================================================
@@ -1233,6 +1544,162 @@ const commands = {
     } catch (err) { await message.reply(`❌ Échec envoi ASMR : ${err.message}`); }
   },
 };
+
+// ============================================================
+//  🏆  TOURNOI — LOGIQUE D'AVANCEMENT
+// ============================================================
+
+/**
+ * Avance le tournoi au prochain match ou au prochain round.
+ * Appelé après chaque vote ou pour démarrer le premier match.
+ */
+async function advanceTournament(tournamentId, channel) {
+  const t = tournamentsData[tournamentId];
+  if (!t || t.status !== 'active') return;
+
+  const pairs = t.currentPairs;
+
+  // Cherche le prochain match non encore joué qui a deux participants réels
+  while (t.currentMatchIndex < pairs.length) {
+    const [p1, p2] = pairs[t.currentMatchIndex];
+
+    // Bye — passe automatiquement
+    if (p2 === null) {
+      console.log(`[TOURNOI] Bye pour ${p1.username} (match ${t.currentMatchIndex + 1})`);
+      t.roundWinners.push(p1);
+      t.history.push({ round: t.currentRound, match: t.currentMatchIndex + 1, winner: p1, loser: null, bye: true });
+      t.currentMatchIndex++;
+      saveTournaments();
+      continue;
+    }
+
+    // Match normal — envoie le versus
+    const voteMsgId = await sendVersus(channel, tournamentId, t.currentMatchIndex, p1, p2);
+    t.currentVoteMessageId = voteMsgId;
+    saveTournaments();
+    return; // Attend le vote
+  }
+
+  // Tous les matchs du round sont terminés
+  const winners = t.roundWinners;
+
+  if (winners.length === 1) {
+    // Gagnant final !
+    t.status = 'finished';
+    t.winner = winners[0];
+    saveTournaments();
+
+    const winnerEmbed = embed('#FFD700')
+      .setTitle('🏆 VICTOIRE FINALE !')
+      .setDescription(
+        `🎉 **${winners[0].username}** remporte le tournoi physique !\n\n` +
+        `Félicitations à <@${winners[0].userId}> pour avoir battu tous les adversaires !`
+      )
+      .addFields(
+        { name: '🥇 Gagnant',        value: `<@${winners[0].userId}>`,                            inline: true },
+        { name: '📊 Participants',    value: `${t.participants.length}`,                           inline: true },
+        { name: '🔢 Rounds joués',   value: `${t.currentRound}`,                                  inline: true },
+      )
+      .setFooter({ text: `Tournoi #${tournamentId} — Terminé` });
+
+    await channel.send({ content: '@everyone', embeds: [winnerEmbed] });
+    return;
+  }
+
+  // Round suivant
+  t.currentRound++;
+  t.allRoundWinners.push(...t.roundWinners);
+  t.currentPairs   = buildRound(winners);
+  t.currentMatchIndex = 0;
+  t.roundWinners   = [];
+  saveTournaments();
+
+  const roundEmbed = embed('#FFD700')
+    .setTitle(`🔄 Round ${t.currentRound} — Début !`)
+    .setDescription(`**${winners.length} joueurs** s'affrontent pour le round ${t.currentRound} !`)
+    .addFields(
+      { name: '🏅 Qualifiés', value: winners.map(w => `<@${w.userId}>`).join(', ').slice(0, 1024), inline: false },
+    );
+
+  await channel.send({ embeds: [roundEmbed] });
+
+  // Premier match du nouveau round
+  await advanceTournament(tournamentId, channel);
+}
+
+// ============================================================
+//  🔘  HANDLER — Boutons de tournoi
+// ============================================================
+
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isButton()) return;
+
+  const customId = interaction.customId;
+  if (!customId.startsWith('tournament_')) return;
+
+  // Vérifie que c'est un admin qui vote
+  if (!isAdmin(interaction.user.id)) {
+    return interaction.reply({ content: '❌ Seul Crous peut voter.', ephemeral: true });
+  }
+
+  // Parse l'ID : tournament_{tournamentId}_{matchIndex}_{choice}
+  const parts = customId.split('_');
+  // Format: tournament_{id}_{matchIndex}_{choice}
+  // id peut contenir '_' donc on reconstruit
+  const choice     = parts[parts.length - 1];           // A ou B
+  const matchIndex = parseInt(parts[parts.length - 2]); // index du match
+  const tournamentId = parts.slice(1, parts.length - 2).join('_'); // id du tournoi
+
+  const t = tournamentsData[tournamentId];
+  if (!t || t.status !== 'active') {
+    return interaction.reply({ content: '❌ Ce tournoi n\'est plus actif.', ephemeral: true });
+  }
+
+  // Vérifie que c'est bien le bon match en attente
+  if (matchIndex !== t.currentMatchIndex) {
+    return interaction.reply({ content: '❌ Ce vote est obsolète.', ephemeral: true });
+  }
+
+  const [p1, p2] = t.currentPairs[matchIndex];
+  const winner = choice === 'A' ? p1 : p2;
+  const loser  = choice === 'A' ? p2 : p1;
+
+  // Enregistre le résultat
+  t.roundWinners.push(winner);
+  t.history.push({ round: t.currentRound, match: matchIndex + 1, winner, loser, bye: false });
+  t.currentMatchIndex++;
+  saveTournaments();
+
+  // Désactive les boutons du message de vote
+  const disabledRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`done_A`)
+      .setLabel(choice === 'A' ? '✅ Joueur A (Gagnant)' : '❌ Joueur A')
+      .setStyle(choice === 'A' ? ButtonStyle.Success : ButtonStyle.Secondary)
+      .setDisabled(true),
+    new ButtonBuilder()
+      .setCustomId(`done_B`)
+      .setLabel(choice === 'B' ? '✅ Joueur B (Gagnant)' : '❌ Joueur B')
+      .setStyle(choice === 'B' ? ButtonStyle.Success : ButtonStyle.Secondary)
+      .setDisabled(true),
+  );
+
+  await interaction.update({ components: [disabledRow] }).catch(() => {});
+
+  // Résultat du match
+  await interaction.channel.send({
+    embeds: [embed('#00FF66')
+      .setTitle(`✅ Match ${matchIndex + 1} — Résultat`)
+      .addFields(
+        { name: '🏆 Gagnant', value: `<@${winner.userId}> (${winner.username})`, inline: true },
+        { name: '❌ Éliminé', value: `<@${loser.userId}> (${loser.username})`,   inline: true },
+      )
+    ],
+  });
+
+  // Passe au prochain match
+  await advanceTournament(tournamentId, interaction.channel);
+});
 
 // ============================================================
 //  📩  HANDLER MESSAGES
@@ -1331,50 +1798,111 @@ client.on('messageReactionRemove', async (reaction, user) => {
 });
 
 // ============================================================
-//  📺  TIKTOK LIVE CHECKER
+//  📺  TIKTOK LIVE CHECKER — VERSION ROBUSTIFIÉE
 // ============================================================
+
+// Cooldown anti-faux positif : exige 2 détections positives consécutives avant de notifier
+let liveDetectionStreak = 0;
+const LIVE_DETECTION_THRESHOLD = 2; // Nombre de checks positifs consécutifs requis
 
 async function checkTikTokLive() {
   try {
-    const response = await axios.get(`https://www.tiktok.com/@${CONFIG.TIKTOK_USERNAME}/live`, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept-Language': 'fr-FR,fr;q=0.9',
-      },
-      timeout: 10000,
-    });
-    const html = response.data;
-    const isCurrentlyLive = (
-      html.includes('"statusStr":"LIVE_STATUS_STREAMING"') ||
-      html.includes('"liveRoomInfo"') && html.includes('"status":2') ||
-      html.includes('isLiveStreaming":true')
+    // On essaie deux endpoints pour croiser les résultats
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Cache-Control': 'no-cache',
+      'Pragma': 'no-cache',
+      'Sec-Fetch-Mode': 'navigate',
+    };
+
+    const response = await axios.get(
+      `https://www.tiktok.com/@${CONFIG.TIKTOK_USERNAME}/live`,
+      { headers, timeout: 15000, maxRedirects: 5 }
     );
+
+    const html = response.data;
+
+    // Patterns de détection multiples — doit en trouver au moins 2 pour considérer comme live
+    const patterns = [
+      /"statusStr"\s*:\s*"LIVE_STATUS_STREAMING"/.test(html),
+      /"isLiveStreaming"\s*:\s*true/.test(html),
+      /"liveRoomInfo"/.test(html) && /"status"\s*:\s*2/.test(html),
+      /roomid[^"]*"[^"]{5,}/.test(html) && !/redirectUrl/.test(html),
+      /"liveUrl"/.test(html) && !/"liveUrl"\s*:\s*""/.test(html),
+    ];
+
+    const positiveSignals = patterns.filter(Boolean).length;
+    const isCurrentlyLive = positiveSignals >= 2; // Seuil de confiance
+
+    console.log(`[LIVE CHECK] @${CONFIG.TIKTOK_USERNAME} — ${positiveSignals}/5 signaux positifs — Streak: ${liveDetectionStreak}`);
+
     const channel = client.channels.cache.get(CONFIG.LIVE_CHANNEL_ID);
-    if (!channel) return;
-    if (isCurrentlyLive && !liveStatus.isLive) {
-      liveStatus.isLive       = true;
-      liveStatus.lastNotified = new Date().toISOString();
-      saveJSON(FILES.liveStatus, liveStatus);
-      const e = embed('#FF0050')
-        .setTitle('🔴 LIVE EN COURS !')
-        .setDescription(`**@${CONFIG.TIKTOK_USERNAME}** est en live sur TikTok !`)
-        .addFields({ name: '🔗 Rejoindre', value: `https://www.tiktok.com/@${CONFIG.TIKTOK_USERNAME}/live`, inline: false })
-        .setFooter({ text: 'TikTok Live Detector' });
-      await channel.send({ content: '@everyone 🔴 Un live vient de démarrer !', embeds: [e] });
-      console.log(`[LIVE] @${CONFIG.TIKTOK_USERNAME} est en live.`);
-    } else if (!isCurrentlyLive && liveStatus.isLive) {
-      liveStatus.isLive = false;
-      saveJSON(FILES.liveStatus, liveStatus);
-      console.log(`[LIVE] @${CONFIG.TIKTOK_USERNAME} a terminé son live.`);
+    if (!channel) {
+      console.error(`[LIVE] Channel ${CONFIG.LIVE_CHANNEL_ID} introuvable.`);
+      return;
     }
+
+    if (isCurrentlyLive) {
+      liveDetectionStreak++;
+
+      // Notifie seulement si le seuil est atteint ET qu'on n'a pas encore notifié
+      if (liveDetectionStreak >= LIVE_DETECTION_THRESHOLD && !liveStatus.isLive) {
+        liveStatus.isLive       = true;
+        liveStatus.lastNotified = new Date().toISOString();
+        saveJSON(FILES.liveStatus, liveStatus);
+
+        const liveEmbed = embed('#FF0050')
+          .setTitle('🔴 LIVE EN COURS !')
+          .setDescription(
+            `**@${CONFIG.TIKTOK_USERNAME}** est actuellement en **live** sur TikTok !\n\n` +
+            `🎯 Clique sur le lien ci-dessous pour rejoindre le live.`
+          )
+          .addFields(
+            { name: '🔗 Lien direct',   value: `https://www.tiktok.com/@${CONFIG.TIKTOK_USERNAME}/live`, inline: false },
+            { name: '⏰ Détecté à',     value: `<t:${Math.floor(Date.now() / 1000)}:T>`,                inline: true  },
+          )
+          .setThumbnail(`https://unavatar.io/tiktok/${CONFIG.TIKTOK_USERNAME}`)
+          .setFooter({ text: `TikTok Live Detector • @${CONFIG.TIKTOK_USERNAME}` });
+
+        await channel.send({
+          content: `@everyone 🔴 **@${CONFIG.TIKTOK_USERNAME}** est en live sur TikTok !`,
+          embeds: [liveEmbed],
+        });
+
+        console.log(`[LIVE] 🔴 @${CONFIG.TIKTOK_USERNAME} est en live — Notification envoyée.`);
+      }
+
+    } else {
+      // Reset du streak si le signal disparaît
+      if (liveDetectionStreak > 0) {
+        console.log(`[LIVE] Streak réinitialisé (${liveDetectionStreak} → 0)`);
+        liveDetectionStreak = 0;
+      }
+
+      if (liveStatus.isLive) {
+        liveStatus.isLive = false;
+        saveJSON(FILES.liveStatus, liveStatus);
+        console.log(`[LIVE] ⚫ @${CONFIG.TIKTOK_USERNAME} a terminé son live.`);
+      }
+    }
+
   } catch (err) {
-    if (err.response?.status === 429) console.warn('[LIVE] Rate limit TikTok.');
-    else console.error('[LIVE] Erreur vérification TikTok:', err.message);
+    if (err.response?.status === 429) {
+      console.warn('[LIVE] ⚠️ Rate limit TikTok — Pause temporaire.');
+    } else if (err.response?.status === 404) {
+      console.warn(`[LIVE] ⚠️ Page TikTok introuvable pour @${CONFIG.TIKTOK_USERNAME}`);
+    } else {
+      console.error('[LIVE] Erreur vérification TikTok:', err.message);
+    }
+    // En cas d'erreur réseau, on ne touche pas au streak ni au statut
   }
 }
 
 // ============================================================
-//  ♻️  RESTAURATION DES TIMERS AU DÉMARRAGE (NPC / TF / JAIL)
+//  ♻️  RESTAURATION DES TIMERS AU DÉMARRAGE
 // ============================================================
 
 async function restoreTimers() {
@@ -1383,31 +1911,39 @@ async function restoreTimers() {
   // — Jails —
   for (const [userId, data] of Object.entries(jailsData)) {
     const remaining = data.until - now;
+    const savedRoleIds = data.savedRoleIds || (data.hadRole ? [CONFIG.JAIL_ACCESS_ROLE_ID] : []);
+
     if (remaining <= 0) {
-      // Jail expiré pendant l'arrêt : libérer immédiatement
+      // Jail expiré pendant l'arrêt — libère immédiatement
       try {
         const guild  = await client.guilds.fetch(data.guildId).catch(() => null);
         if (!guild) { delete jailsData[userId]; continue; }
         const member = await guild.members.fetch(userId).catch(() => null);
-        const accessRole = guild.roles.cache.get(CONFIG.JAIL_ACCESS_ROLE_ID);
-        if (member && data.hadRole && accessRole && !member.roles.cache.has(CONFIG.JAIL_ACCESS_ROLE_ID)) {
-          await member.roles.add(accessRole, 'Libération automatique (rattrapage démarrage)');
+        if (member && savedRoleIds.length > 0) {
+          await unjailMember(member, savedRoleIds, 'Libération automatique (rattrapage démarrage)');
         }
       } catch (err) { console.error('[RESTORE JAIL] Erreur :', err.message); }
       delete jailsData[userId];
     } else {
-      console.log(`[RESTORE] Jail restauré pour ${userId} — ${Math.ceil(remaining / 1000 / 60)} min restantes`);
+      console.log(`[RESTORE] Jail restauré pour ${userId} — ${Math.ceil(remaining / 1000 / 60)} min restantes (${savedRoleIds.length} rôles sauvegardés)`);
       setTimeout(async () => {
         try {
           const guild  = await client.guilds.fetch(data.guildId).catch(() => null);
           if (!guild) { delete jailsData[userId]; saveJails(); return; }
           const member = await guild.members.fetch(userId).catch(() => null);
-          const accessRole = guild.roles.cache.get(CONFIG.JAIL_ACCESS_ROLE_ID);
-          if (member && data.hadRole && accessRole && !member.roles.cache.has(CONFIG.JAIL_ACCESS_ROLE_ID)) {
-            await member.roles.add(accessRole, 'Libération automatique après jail');
+          const saved  = jailsData[userId];
+          if (member && saved?.savedRoleIds?.length > 0) {
+            await unjailMember(member, saved.savedRoleIds, 'Libération automatique après jail');
           }
           delete jailsData[userId]; saveJails();
-          console.log(`[RESTORE JAIL] ${userId} libéré.`);
+          console.log(`[RESTORE JAIL] ${userId} libéré — rôles restaurés.`);
+          // Notifie dans le salon prison si possible
+          const prisonCh = guild.channels.cache.get(CONFIG.JAIL_PRISON_CHANNEL_ID);
+          if (prisonCh) {
+            await prisonCh.send({
+              embeds: [embed('#00FF66').setTitle('🔓 Libéré !').setDescription(`<@${userId}> a purgé sa peine. Tous ses rôles ont été restaurés.`)],
+            }).catch(() => {});
+          }
         } catch (err) { console.error('[RESTORE JAIL] Erreur libération :', err.message); }
       }, remaining);
     }
@@ -1421,8 +1957,10 @@ async function restoreTimers() {
       try {
         const guild  = await client.guilds.fetch(data.guildId).catch(() => null);
         const member = guild ? await guild.members.fetch(userId).catch(() => null) : null;
-        const restore = data.originalNick === member?.user?.username ? null : data.originalNick;
-        if (member) await member.setNickname(restore, 'Fin NPC (rattrapage démarrage)');
+        if (member) {
+          const restore = data.originalNick === member.user.username ? null : data.originalNick;
+          await member.setNickname(restore, 'Fin NPC (rattrapage démarrage)');
+        }
       } catch {}
       delete npcList[userId];
     } else {
@@ -1430,8 +1968,10 @@ async function restoreTimers() {
         try {
           const guild  = await client.guilds.fetch(data.guildId).catch(() => null);
           const member = guild ? await guild.members.fetch(userId).catch(() => null) : null;
-          const restore = data.originalNick === member?.user?.username ? null : data.originalNick;
-          if (member) await member.setNickname(restore, 'Fin du statut NPC');
+          if (member) {
+            const restore = data.originalNick === member.user.username ? null : data.originalNick;
+            await member.setNickname(restore, 'Fin du statut NPC');
+          }
           delete npcList[userId]; saveNpcList();
         } catch {}
       }, remaining);
@@ -1446,8 +1986,10 @@ async function restoreTimers() {
       try {
         const guild  = await client.guilds.fetch(data.guildId).catch(() => null);
         const member = guild ? await guild.members.fetch(userId).catch(() => null) : null;
-        const restore = data.originalNick === member?.user?.username ? null : data.originalNick;
-        if (member) await member.setNickname(restore, 'Fin TF (rattrapage démarrage)');
+        if (member) {
+          const restore = data.originalNick === member.user.username ? null : data.originalNick;
+          await member.setNickname(restore, 'Fin TF (rattrapage démarrage)');
+        }
       } catch {}
       delete tfList[userId];
     } else {
@@ -1455,8 +1997,10 @@ async function restoreTimers() {
         try {
           const guild  = await client.guilds.fetch(data.guildId).catch(() => null);
           const member = guild ? await guild.members.fetch(userId).catch(() => null) : null;
-          const restore = data.originalNick === member?.user?.username ? null : data.originalNick;
-          if (member) await member.setNickname(restore, 'Fin du TF');
+          if (member) {
+            const restore = data.originalNick === member.user.username ? null : data.originalNick;
+            await member.setNickname(restore, 'Fin du TF');
+          }
           delete tfList[userId]; saveTfList();
         } catch {}
       }, remaining);
@@ -1464,7 +2008,7 @@ async function restoreTimers() {
   }
   saveTfList();
 
-  console.log('[RESTORE] Timers restaurés avec succès.');
+  console.log('[RESTORE] ✅ Timers restaurés avec succès.');
 }
 
 // ============================================================
@@ -1480,7 +2024,6 @@ client.once('ready', async () => {
   console.log(`🎫 Ticket viewer role: ${ticketConfig.viewRoleId  || 'non défini'}`);
   console.log(`🎫 Ticket staff role:  ${ticketConfig.staffRoleId || 'non défini'}`);
   console.log(`🎫 Tickets actifs: ${Object.keys(ticketsData).length}`);
-  console.log(`🔒 Jail access role: ${CONFIG.JAIL_ACCESS_ROLE_ID}`);
   console.log(`🔒 Jail prison channel: ${CONFIG.JAIL_PRISON_CHANNEL_ID}`);
   console.log(`📋 Sanction log channel: ${sanctionLogData.channelId || 'non défini'}`);
   console.log(`⚠️  Warns chargés: ${Object.keys(warnsData).length} membre(s)`);
