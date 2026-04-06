@@ -32,14 +32,26 @@ const CONFIG = {
     EMOJI:      '\u2705',
   },
 
-  JAIL_ACCESS_ROLE_ID: '1487674672865611806',
+  JAIL_ACCESS_ROLE_ID:    '1487674672865611806',
   JAIL_PRISON_CHANNEL_ID: '1489385660979872005',
-  JAIL_DURATION_MS: 5 * 60 * 1000,
+  JAIL_DURATION_MS:       5 * 60 * 1000,
   JAIL_PROTECTED_ROLE_IDS: [],
+
+  // ── RATING SYSTÈME ──────────────────────────────────────────
+  RATING_ROLE_ID: '1490645216192102421',   // Rôle requis pour voter / voir le rating
+
+  // ── JSONBIN CONFIG ───────────────────────────────────────────
+  // 1. Va sur https://jsonbin.io  → crée un compte gratuit
+  // 2. Copie ta Master Key (API Keys → Master Key)
+  // 3. Lance le bot une 1ère fois → il crée automatiquement le bin
+  // OU : crée manuellement un bin avec { "girls": [], "activeVotes": {} }
+  //      et colle son ID dans JSONBIN_BIN_ID
+  JSONBIN_MASTER_KEY: process.env.JSONBIN_MASTER_KEY || '$2a$10$AwINYOxVh1uCEQVco3Da1uJf/hMkwcibwHt7r5CVoUsEbC36wGr8u',   // variable Railway
+  JSONBIN_BIN_ID:     process.env.JSONBIN_BIN_ID     || '',   // variable Railway (optionnel si auto-création)
 };
 
 // ============================================================
-//  CHEMINS DES FICHIERS DE DONNEES
+//  CHEMINS DES FICHIERS DE DONNÉES LOCAUX
 // ============================================================
 
 const DATA_DIR = path.join(__dirname, 'data');
@@ -57,12 +69,13 @@ const FILES = {
   npcList:       path.join(DATA_DIR, 'npc_list.json'),
   tfList:        path.join(DATA_DIR, 'tf_list.json'),
   tournaments:   path.join(DATA_DIR, 'tournaments.json'),
+  jsonbinId:     path.join(DATA_DIR, 'jsonbin_id.json'),   // stocke l'ID du bin créé auto
 };
 
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
 // ============================================================
-//  HELPERS JSON
+//  HELPERS JSON LOCAUX
 // ============================================================
 
 function loadJSON(file, defaultVal) {
@@ -78,7 +91,86 @@ function saveJSON(file, data) {
 }
 
 // ============================================================
-//  DONNEES
+//  JSONBIN — BASE DE DONNÉES EN LIGNE
+// ============================================================
+
+let _binId = CONFIG.JSONBIN_BIN_ID || loadJSON(FILES.jsonbinId, {}).id || '';
+
+const JSONBIN_HEADERS = () => ({
+  'Content-Type':  'application/json',
+  'X-Master-Key':  CONFIG.JSONBIN_MASTER_KEY,
+  'X-Bin-Versioning': 'false',    // toujours écraser, pas de versioning
+});
+
+// Structure par défaut du bin
+const DEFAULT_GYMGIRLS = { girls: [], activeVotes: {} };
+
+async function jsonbinGet() {
+  if (!_binId) return { ...DEFAULT_GYMGIRLS };
+  try {
+    const res = await axios.get(`https://api.jsonbin.io/v3/b/${_binId}/latest`, {
+      headers: JSONBIN_HEADERS(),
+      timeout: 10000,
+    });
+    return res.data.record || { ...DEFAULT_GYMGIRLS };
+  } catch (err) {
+    console.error('[JSONBIN] Erreur GET :', err.message);
+    return { ...DEFAULT_GYMGIRLS };
+  }
+}
+
+async function jsonbinSet(data) {
+  if (!CONFIG.JSONBIN_MASTER_KEY) {
+    console.warn('[JSONBIN] Pas de Master Key configurée — données non sauvegardées en ligne.');
+    return;
+  }
+
+  // Créer le bin si inexistant
+  if (!_binId) {
+    try {
+      const res = await axios.post('https://api.jsonbin.io/v3/b', data, {
+        headers: { ...JSONBIN_HEADERS(), 'X-Bin-Name': 'gymgirls-rating', 'X-Bin-Private': 'true' },
+        timeout: 10000,
+      });
+      _binId = res.data.metadata.id;
+      saveJSON(FILES.jsonbinId, { id: _binId });
+      console.log(`[JSONBIN] Bin créé automatiquement : ${_binId}`);
+    } catch (err) {
+      console.error('[JSONBIN] Erreur création bin :', err.message);
+    }
+    return;
+  }
+
+  try {
+    await axios.put(`https://api.jsonbin.io/v3/b/${_binId}`, data, {
+      headers: JSONBIN_HEADERS(),
+      timeout: 10000,
+    });
+  } catch (err) {
+    console.error('[JSONBIN] Erreur PUT :', err.message);
+  }
+}
+
+// Cache local pour éviter trop d'appels réseau
+let _gymgirlsCache = null;
+let _cacheTs       = 0;
+const CACHE_TTL    = 30 * 1000; // 30 secondes
+
+async function getGymgirls() {
+  if (_gymgirlsCache && Date.now() - _cacheTs < CACHE_TTL) return _gymgirlsCache;
+  _gymgirlsCache = await jsonbinGet();
+  _cacheTs       = Date.now();
+  return _gymgirlsCache;
+}
+
+async function saveGymgirls(data) {
+  _gymgirlsCache = data;
+  _cacheTs       = Date.now();
+  await jsonbinSet(data);
+}
+
+// ============================================================
+//  DONNÉES LOCALES
 // ============================================================
 
 let studyData = loadJSON(FILES.study, {
@@ -116,7 +208,7 @@ let tfList            = loadJSON(FILES.tfList,         {});
 let tournamentsData   = loadJSON(FILES.tournaments,    {});
 
 let ticketConfig = loadJSON(FILES.ticketConfig, {
-  viewRoleId: null,
+  viewRoleId:  null,
   staffRoleId: null,
 });
 
@@ -145,7 +237,10 @@ const client = new Client({
   partials: [Partials.Message, Partials.Channel, Partials.Reaction],
 });
 
-function isAdmin(userId) { return CONFIG.ADMIN_IDS.includes(userId); }
+function isAdmin(userId)   { return CONFIG.ADMIN_IDS.includes(userId); }
+function hasRatingRole(member) {
+  return member.roles.cache.has(CONFIG.RATING_ROLE_ID) || isAdmin(member.id);
+}
 function embed(color = '#5865F2') { return new EmbedBuilder().setColor(color).setTimestamp(); }
 
 // ============================================================
@@ -165,7 +260,7 @@ async function logSanction(guild, fields, title, color = '#FF4444') {
 }
 
 // ============================================================
-//  HELPER -- Met a jour l'embed du message RR
+//  HELPER — Met à jour l'embed du message RR
 // ============================================================
 
 async function updateRREmbed(targetMessage, rrEntry) {
@@ -187,71 +282,50 @@ async function updateRREmbed(targetMessage, rrEntry) {
 
 async function jailMember(member, reason) {
   const guild = member.guild;
-
   const rolesToRemove = member.roles.cache.filter(role =>
     role.id !== guild.id &&
     !CONFIG.JAIL_PROTECTED_ROLE_IDS.includes(role.id) &&
     role.managed === false
   );
   const removedRoleIds = rolesToRemove.map(r => r.id);
-  if (removedRoleIds.length > 0) {
-    await member.roles.remove(rolesToRemove, reason);
-  }
+  if (removedRoleIds.length > 0) await member.roles.remove(rolesToRemove, reason);
 
   const channelPromises = guild.channels.cache
-    .filter(ch =>
-      ch.id !== CONFIG.JAIL_PRISON_CHANNEL_ID &&
-      (ch.isTextBased() || ch.isVoiceBased())
-    )
-    .map(ch =>
-      ch.permissionOverwrites.edit(member.id, {
-        ViewChannel:  false,
-        SendMessages: false,
-        Connect:      false,
-      }, { reason }).catch(err =>
-        console.warn(`[JAIL] Impossible de modifier #${ch.name} : ${err.message}`)
-      )
-    );
+    .filter(ch => ch.id !== CONFIG.JAIL_PRISON_CHANNEL_ID && (ch.isTextBased() || ch.isVoiceBased()))
+    .map(ch => ch.permissionOverwrites.edit(member.id, {
+      ViewChannel: false, SendMessages: false, Connect: false,
+    }, { reason }).catch(err => console.warn(`[JAIL] Impossible de modifier #${ch.name} : ${err.message}`)));
   await Promise.all(channelPromises);
 
   const prisonChannel = guild.channels.cache.get(CONFIG.JAIL_PRISON_CHANNEL_ID);
   if (prisonChannel) {
     await prisonChannel.permissionOverwrites.edit(member.id, {
-      ViewChannel:        true,
-      SendMessages:       true,
-      ReadMessageHistory: true,
-    }, { reason }).catch(err =>
-      console.warn(`[JAIL] Impossible de modifier le salon prison : ${err.message}`)
-    );
+      ViewChannel: true, SendMessages: true, ReadMessageHistory: true,
+    }, { reason }).catch(err => console.warn(`[JAIL] Impossible de modifier le salon prison : ${err.message}`));
   }
 
-  console.log(`[JAIL] ${member.user.tag} verrouille -- ${removedRoleIds.length} roles retires, acces restreint au salon prison.`);
+  console.log(`[JAIL] ${member.user.tag} verrouille -- ${removedRoleIds.length} roles retires.`);
   return removedRoleIds;
 }
 
 async function unjailMember(member, savedRoleIds, reason) {
   const guild = member.guild;
-
   const channelPromises = guild.channels.cache
     .filter(ch => ch.isTextBased() || ch.isVoiceBased())
-    .map(ch =>
-      ch.permissionOverwrites.delete(member.id, reason).catch(() => {})
-    );
+    .map(ch => ch.permissionOverwrites.delete(member.id, reason).catch(() => {}));
   await Promise.all(channelPromises);
 
   const rolesToAdd = savedRoleIds
     .map(id => guild.roles.cache.get(id))
     .filter(Boolean)
     .filter(role => !member.roles.cache.has(role.id));
-  if (rolesToAdd.length > 0) {
-    await member.roles.add(rolesToAdd, reason);
-  }
+  if (rolesToAdd.length > 0) await member.roles.add(rolesToAdd, reason);
 
-  console.log(`[JAIL] ${member.user.tag} libere -- overwrites supprimes, ${rolesToAdd.length} role(s) restaure(s).`);
+  console.log(`[JAIL] ${member.user.tag} libere -- ${rolesToAdd.length} role(s) restaure(s).`);
 }
 
 // ============================================================
-//  TOURNOI -- HELPERS
+//  TOURNOI — HELPERS
 // ============================================================
 
 function shuffle(arr) {
@@ -266,25 +340,15 @@ function shuffle(arr) {
 function buildRound(participants) {
   const shuffled = shuffle(participants);
   const pairs = [];
-  for (let i = 0; i + 1 < shuffled.length; i += 2) {
-    pairs.push([shuffled[i], shuffled[i + 1]]);
-  }
-  if (shuffled.length % 2 !== 0) {
-    pairs.push([shuffled[shuffled.length - 1], null]);
-  }
+  for (let i = 0; i + 1 < shuffled.length; i += 2) pairs.push([shuffled[i], shuffled[i + 1]]);
+  if (shuffled.length % 2 !== 0) pairs.push([shuffled[shuffled.length - 1], null]);
   return pairs;
 }
 
 async function sendVersus(channel, tournamentId, matchIndex, p1, p2) {
   const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`tournament_${tournamentId}_${matchIndex}_A`)
-      .setLabel('\uD83C\uDFC6 Joueur A')
-      .setStyle(ButtonStyle.Primary),
-    new ButtonBuilder()
-      .setCustomId(`tournament_${tournamentId}_${matchIndex}_B`)
-      .setLabel('\uD83C\uDFC6 Joueur B')
-      .setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId(`tournament_${tournamentId}_${matchIndex}_A`).setLabel('\uD83C\uDFC6 Joueur A').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`tournament_${tournamentId}_${matchIndex}_B`).setLabel('\uD83C\uDFC6 Joueur B').setStyle(ButtonStyle.Danger),
   );
 
   const versusEmbed = embed('#FFD700')
@@ -297,23 +361,13 @@ async function sendVersus(channel, tournamentId, matchIndex, p1, p2) {
     )
     .setFooter({ text: `Tournoi #${tournamentId} -- Crous choisit le gagnant` });
 
-  await channel.send({
-    content: `**Match ${matchIndex + 1}** -- \uD83C\uDD70\uFE0F **${p1.username}** vs \uD83C\uDD71\uFE0F **${p2.username}**`,
-  });
-
-  await channel.send({
-    content: `\uD83C\uDD70\uFE0F **${p1.username}**`,
-    files: [p1.imageUrl],
-  }).catch(async () => {
-    return channel.send({ content: `\uD83C\uDD70\uFE0F **${p1.username}** -- (image : ${p1.imageUrl})` });
-  });
-
-  await channel.send({
-    content: `\uD83C\uDD71\uFE0F **${p2.username}**`,
-    files: [p2.imageUrl],
-  }).catch(async () => {
-    return channel.send({ content: `\uD83C\uDD71\uFE0F **${p2.username}** -- (image : ${p2.imageUrl})` });
-  });
+  await channel.send({ content: `**Match ${matchIndex + 1}** -- \uD83C\uDD70\uFE0F **${p1.username}** vs \uD83C\uDD71\uFE0F **${p2.username}**` });
+  await channel.send({ content: `\uD83C\uDD70\uFE0F **${p1.username}**`, files: [p1.imageUrl] }).catch(async () =>
+    channel.send({ content: `\uD83C\uDD70\uFE0F **${p1.username}** -- (image : ${p1.imageUrl})` })
+  );
+  await channel.send({ content: `\uD83C\uDD71\uFE0F **${p2.username}**`, files: [p2.imageUrl] }).catch(async () =>
+    channel.send({ content: `\uD83C\uDD71\uFE0F **${p2.username}** -- (image : ${p2.imageUrl})` })
+  );
 
   const voteMsg = await channel.send({ embeds: [versusEmbed], components: [row] });
   return voteMsg.id;
@@ -325,149 +379,99 @@ async function sendVersus(channel, tournamentId, matchIndex, p1, p2) {
 
 const commands = {
 
-  // AIDE
+  // ── AIDE ────────────────────────────────────────────────────
   '!aide': async (message) => {
-    const viewRoleDisplay   = ticketConfig.viewRoleId  ? `<@&${ticketConfig.viewRoleId}>`  : '`non defini`';
-    const staffRoleDisplay  = ticketConfig.staffRoleId ? `<@&${ticketConfig.staffRoleId}>` : '`non defini`';
+    const viewRoleDisplay   = ticketConfig.viewRoleId   ? `<@&${ticketConfig.viewRoleId}>`   : '`non defini`';
+    const staffRoleDisplay  = ticketConfig.staffRoleId  ? `<@&${ticketConfig.staffRoleId}>`  : '`non defini`';
     const logChannelDisplay = sanctionLogData.channelId ? `<#${sanctionLogData.channelId}>` : '`non defini`';
 
     const e1 = embed('#5865F2')
       .setTitle('Aide -- Commandes generales')
       .setDescription('Prefixe : `!` -- Les commandes marquees sont reservees aux admins.')
       .addFields(
-        {
-          name: 'Etudes & Supplements',
-          value: [
+        { name: 'Etudes & Supplements', value: [
             '`!pubmed` -- Affiche la derniere etude enregistree',
             '`!def-etude <titre> | <url> | <desc>` -- Definit une nouvelle etude',
-            '`!cope` -- Liste complete des complements (cope / interessants)',
-            '`!cope-du-jour` -- Tire un cope aleatoire avec refutation scientifique',
+            '`!cope` -- Liste complete des complements',
+            '`!cope-du-jour` -- Tire un cope aleatoire avec refutation',
             '`!add-cope <nom>` / `!remove-cope <nom>`',
             '`!add-interesting <nom>` / `!remove-interesting <nom>`',
-          ].join('\n'),
-          inline: false,
-        },
-        {
-          name: 'Regles',
-          value: [
+          ].join('\n'), inline: false },
+        { name: 'Regles', value: [
             '`!regles` -- Affiche toutes les regles',
-            '`!regle<N>` -- Affiche la regle numero N (ex: `!regle3`)',
+            '`!regle<N>` -- Affiche la regle N',
             '`!set-regle <N> | <texte>` -- Modifie une regle',
-          ].join('\n'),
-          inline: false,
-        },
-        {
-          name: 'Annonces',
-          value: '`!say <#channel> | <titre> | <desc> | [couleur] | [image] | [footer]`',
-          inline: false,
-        },
-        {
-          name: 'Live TikTok',
-          value: 'Detection automatique des lives -- aucune commande requise.',
-          inline: false,
-        },
-        {
-          name: 'ASMR',
-          value: '`!mommy-asmr` -- *Acces restreint aux IDs autorises*',
-          inline: false,
-        },
-        {
-          name: 'Fun & Troll',
-          value: [
+          ].join('\n'), inline: false },
+        { name: 'Annonces', value: '`!say <#channel> | <titre> | <desc> | [couleur] | [image] | [footer]`', inline: false },
+        { name: 'Rating Gymgirl', value: [
+            '`!rate` -- Lance un duel ELO entre 2 gymgirls (role requis)',
+            '`!rate-top` -- Classement ELO (role requis)',
+            '`!rate-list` -- Liste complete avec scores (admin)',
+            '`!rate-add <nom> | <url>` -- Ajouter une gymgirl (admin)',
+            '`!rate-remove <nom>` -- Retirer une gymgirl (admin)',
+            '`!rate-reset <nom>` -- Reinitialiser l\'ELO (admin)',
+            '`!give-rating @user` -- Donner le role rating (admin)',
+          ].join('\n'), inline: false },
+        { name: 'Fun & Troll', value: [
             '`!iqtest [@user]` -- Test de QI certifie fluide',
             '`!fluide @user` -- Place un membre sous systeme fluide',
             '`!tf @user` -- Renomme trollement un membre 10 min',
             '`!npc @user` -- Declare un membre NPC pour 10 min',
-            '`!resetpseudo @user` -- Reinitialise le surnom d\'un membre',
-          ].join('\n'),
-          inline: false,
-        },
-        {
-          name: 'Tournoi physique',
-          value: [
-            '`!tournoi-start <#channel-photos>` -- Lance un tournoi avec toutes les photos du salon',
-            '`!tournoi-status` -- Affiche l\'etat du tournoi en cours',
-            '`!tournoi-cancel` -- Annule le tournoi en cours',
-          ].join('\n'),
-          inline: false,
-        },
-        {
-          name: 'Utilitaires',
-          value: '`!clear <nombre>` -- Supprime N messages dans le salon (max 100)',
-          inline: false,
-        },
+            '`!resetpseudo @user` -- Reinitialise le surnom',
+          ].join('\n'), inline: false },
+        { name: 'Tournoi physique', value: [
+            '`!tournoi-start <#channel-photos>` -- Lance un tournoi',
+            '`!tournoi-status` -- Etat du tournoi en cours',
+            '`!tournoi-cancel` -- Annule le tournoi',
+          ].join('\n'), inline: false },
+        { name: 'Utilitaires', value: '`!clear <nombre>` -- Supprime N messages (max 100)', inline: false },
       )
       .setFooter({ text: 'Page 1 / 3 -- Tape !aide2 pour la moderation, !aide3 pour tickets & RR' });
 
     const e2 = embed('#FF4444')
       .setTitle('Aide -- Moderation')
-      .setDescription('Toutes les commandes de cette page sont reservees aux admins sauf mention contraire.')
+      .setDescription('Toutes les commandes de cette page sont reservees aux admins.')
       .addFields(
-        {
-          name: 'Systeme de warns',
-          value: [
-            '`!warn @user [raison]` -- Avertit un membre (auto-jail au 3eme warn)',
-            '`!warns @user` -- Affiche l\'historique des warns d\'un membre',
-            '`!clearwarns @user` -- Supprime tous les warns d\'un membre',
-          ].join('\n'),
-          inline: false,
-        },
-        {
-          name: 'Jail',
-          value: [
-            '`!jail @user` -- Emprisonne un membre (retire TOUS ses roles + bloque tous les salons pendant 5 min)',
-            '`!expiredjails` -- Liste les jails actifs avec temps restant',
-          ].join('\n'),
-          inline: false,
-        },
-        {
-          name: 'Mutes automatiques',
-          value: [
-            '`!source` -- Auto-mute 10 min si utilise par un non-admin (regle 1)',
-            '`!mk677` -- Auto-mute 10 min si utilise par un non-admin (regle 1)',
-            '`!ban @user [raison]` -- Bannit definitivement un membre',
-          ].join('\n'),
-          inline: false,
-        },
-        {
-          name: 'Logs de sanctions',
-          value: [
+        { name: 'Warns', value: [
+            '`!warn @user [raison]` -- Avertit (auto-jail au 3eme warn)',
+            '`!warns @user` -- Historique des warns',
+            '`!clearwarns @user` -- Supprime tous les warns',
+          ].join('\n'), inline: false },
+        { name: 'Jail', value: [
+            '`!jail @user` -- Emprisonne 5 min (retire TOUS les roles)',
+            '`!expiredjails` -- Jails actifs avec temps restant',
+          ].join('\n'), inline: false },
+        { name: 'Mutes automatiques', value: [
+            '`!source` -- Auto-mute 10 min (regle 1)',
+            '`!mk677` -- Auto-mute 10 min (regle 1)',
+            '`!ban @user [raison]` -- Bannit definitivement',
+          ].join('\n'), inline: false },
+        { name: 'Logs de sanctions', value: [
             '`!sanction-log <#channel>` -- Definit le salon de logs',
             `Salon actuel : ${logChannelDisplay}`,
-            '_Toutes les sanctions (warn, jail, ban) y sont automatiquement enregistrees._',
-          ].join('\n'),
-          inline: false,
-        },
+          ].join('\n'), inline: false },
       )
       .setFooter({ text: 'Page 2 / 3 -- Tape !aide pour les commandes generales, !aide3 pour tickets & RR' });
 
     const e3 = embed('#7289DA')
       .setTitle('Aide -- Tickets & Reaction Roles')
       .addFields(
-        {
-          name: 'Tickets',
-          value: [
+        { name: 'Tickets', value: [
             '`!ticket <motif>` -- Ouvre un ticket prive',
             '`!fermer` -- Ferme le ticket (depuis le salon ticket)',
-            '`!ticket-setrole @role` -- Role qui voit les tickets (lecture seule)',
-            '`!ticket-setstaff @role` -- Role qui peut ecrire dans les tickets',
-            '`!ticket-config` -- Affiche la configuration actuelle',
+            '`!ticket-setrole @role` -- Role viewer (lecture seule)',
+            '`!ticket-setstaff @role` -- Role staff (ecriture)',
+            '`!ticket-config` -- Configuration actuelle',
             `Viewer : ${viewRoleDisplay} | Staff : ${staffRoleDisplay}`,
-          ].join('\n'),
-          inline: false,
-        },
-        {
-          name: 'Reaction Roles',
-          value: [
+          ].join('\n'), inline: false },
+        { name: 'Reaction Roles', value: [
             '`!rr-setup <#channel> | <titre> | <desc>` -- Cree un message RR',
             '`!rr-attach <msgID> <#channel> | <titre> | <desc>` -- Attache a un message existant',
             '`!rr-add <msgID> | <emoji> | <@role>` -- Ajoute un emoji/role',
             '`!rr-remove <msgID> | <emoji>` -- Retire un emoji/role',
-            '`!rr-list` -- Liste tous les messages RR configures',
+            '`!rr-list` -- Liste tous les messages RR',
             '`!rr-delete <msgID>` -- Supprime un message RR',
-          ].join('\n'),
-          inline: false,
-        },
+          ].join('\n'), inline: false },
       )
       .setFooter({ text: 'Page 3 / 3 -- Tape !aide pour les commandes generales, !aide2 pour la moderation' });
 
@@ -479,48 +483,40 @@ const commands = {
   '!aide2': async (message) => { await commands['!aide'](message); },
   '!aide3': async (message) => { await commands['!aide'](message); },
 
-  // CLEAR
+  // ── CLEAR ────────────────────────────────────────────────────
   '!clear': async (message, args) => {
     if (!isAdmin(message.author.id)) return message.reply('Permission refusee.');
     const amount = parseInt(args[0]);
-    if (isNaN(amount) || amount < 1 || amount > 100) {
-      return message.reply('Specifie un nombre entre 1 et 100. Ex : `!clear 10`');
-    }
+    if (isNaN(amount) || amount < 1 || amount > 100) return message.reply('Specifie un nombre entre 1 et 100. Ex : `!clear 10`');
     try {
       await message.delete().catch(() => {});
       const deleted = await message.channel.bulkDelete(amount, true);
       const confirm = await message.channel.send({
-        embeds: [embed('#00FF66')
-          .setTitle('Messages supprimes')
+        embeds: [embed('#00FF66').setTitle('Messages supprimes')
           .setDescription(`**${deleted.size}** message(s) supprime(s) par <@${message.author.id}>.`)
-          .setFooter({ text: 'Ce message disparait dans 5 secondes.' })
-        ],
+          .setFooter({ text: 'Ce message disparait dans 5 secondes.' })],
       });
       setTimeout(() => confirm.delete().catch(() => {}), 5000);
     } catch (err) {
-      const errMsg = await message.channel.send(`Erreur lors de la suppression : ${err.message}`).catch(() => null);
+      const errMsg = await message.channel.send(`Erreur : ${err.message}`).catch(() => null);
       if (errMsg) setTimeout(() => errMsg.delete().catch(() => {}), 6000);
     }
   },
 
-  // SAY
+  // ── SAY ──────────────────────────────────────────────────────
   '!say': async (message, args) => {
     if (!isAdmin(message.author.id)) return message.reply('Permission refusee.');
     try { await message.delete(); } catch {}
     const parts = args.join(' ').split('|').map(s => s.trim());
     if (parts.length < 3) {
-      try {
-        const errMsg = await message.channel.send('Format : `!say <#channel> | <titre> | <description> | [couleur] | [image_url] | [footer]`');
-        setTimeout(() => errMsg.delete().catch(() => {}), 8000);
-      } catch {}
+      const errMsg = await message.channel.send('Format : `!say <#channel> | <titre> | <description> | [couleur] | [image_url] | [footer]`');
+      setTimeout(() => errMsg.delete().catch(() => {}), 8000);
       return;
     }
     const targetChannel = message.mentions.channels.first();
     if (!targetChannel) {
-      try {
-        const errMsg = await message.channel.send('Mentionne un salon valide en premier parametre.');
-        setTimeout(() => errMsg.delete().catch(() => {}), 5000);
-      } catch {}
+      const errMsg = await message.channel.send('Mentionne un salon valide en premier parametre.');
+      setTimeout(() => errMsg.delete().catch(() => {}), 5000);
       return;
     }
     const titre       = parts[1] || 'Annonce';
@@ -535,14 +531,12 @@ const commands = {
     try {
       await targetChannel.send({ embeds: [sayEmbed] });
     } catch (err) {
-      try {
-        const errMsg = await message.channel.send(`Impossible d'envoyer dans ce salon : ${err.message}`);
-        setTimeout(() => errMsg.delete().catch(() => {}), 5000);
-      } catch {}
+      const errMsg = await message.channel.send(`Impossible d'envoyer dans ce salon : ${err.message}`);
+      setTimeout(() => errMsg.delete().catch(() => {}), 5000);
     }
   },
 
-  // WARNS
+  // ── WARNS ────────────────────────────────────────────────────
   '!warn': async (message, args) => {
     if (!isAdmin(message.author.id)) return message.reply('Permission refusee.');
     const target = message.mentions.members.first();
@@ -555,66 +549,46 @@ const commands = {
     saveWarns();
 
     const warnCount = warnsData[target.id].length;
-
     const warnEmbed = embed('#FFA500')
       .setTitle(`Avertissement -- Warn ${warnCount}/3`)
       .setDescription(`<@${target.id}> a recu un avertissement.`)
       .addFields(
-        { name: 'Raison',    value: reason,                      inline: false },
-        { name: 'Par',       value: `<@${message.author.id}>`,   inline: true  },
-        { name: 'Total',     value: `${warnCount} warn(s)`,      inline: true  },
+        { name: 'Raison', value: reason,                    inline: false },
+        { name: 'Par',    value: `<@${message.author.id}>`, inline: true  },
+        { name: 'Total',  value: `${warnCount} warn(s)`,    inline: true  },
       )
       .setFooter({ text: warnCount >= 3 ? '3 warns atteints -- Jail automatique declenche !' : `${3 - warnCount} warn(s) avant jail automatique` });
-
     await message.reply({ embeds: [warnEmbed] });
 
     await logSanction(message.guild, [
-      { name: 'Membre',  value: `<@${target.id}>`,            inline: true },
-      { name: 'Par',     value: `<@${message.author.id}>`,    inline: true },
-      { name: 'Raison',  value: reason,                       inline: false },
-      { name: 'Total',   value: `${warnCount}/3`,             inline: true },
+      { name: 'Membre', value: `<@${target.id}>`,          inline: true },
+      { name: 'Par',    value: `<@${message.author.id}>`,  inline: true },
+      { name: 'Raison', value: reason,                     inline: false },
+      { name: 'Total',  value: `${warnCount}/3`,           inline: true },
     ], `Warn #${warnCount} -- ${target.user.tag}`, '#FFA500');
 
     if (warnCount >= 3) {
       const prisonChannel = message.guild.channels.cache.get(CONFIG.JAIL_PRISON_CHANNEL_ID);
       const dureeMin = Math.round(CONFIG.JAIL_DURATION_MS / 60000);
-
       try {
         const removedRoleIds = await jailMember(target, 'Auto-jail (3 warns)');
-
-        jailsData[target.id] = {
-          until: Date.now() + CONFIG.JAIL_DURATION_MS,
-          savedRoleIds: removedRoleIds,
-          hadRole: removedRoleIds.includes(CONFIG.JAIL_ACCESS_ROLE_ID),
-          guildId: message.guild.id,
-        };
+        jailsData[target.id] = { until: Date.now() + CONFIG.JAIL_DURATION_MS, savedRoleIds: removedRoleIds, hadRole: removedRoleIds.includes(CONFIG.JAIL_ACCESS_ROLE_ID), guildId: message.guild.id };
         saveJails();
 
-        const autoJailEmbed = embed('#FF4444')
-          .setTitle('Jail automatique -- 3 warns atteints')
-          .setDescription(
-            `<@${target.id}> a ete automatiquement emprisonne pour **${dureeMin} minutes** suite a son 3eme warn.\n` +
-            `**${removedRoleIds.length}** role(s) retire(s) -- acces restreint au salon prison uniquement.`
-          )
-          .setFooter({ text: 'Reflechis a tes actes.' });
-
-        await message.channel.send({ embeds: [autoJailEmbed] });
+        await message.channel.send({ embeds: [embed('#FF4444').setTitle('Jail automatique -- 3 warns atteints')
+          .setDescription(`<@${target.id}> emprisonne pour **${dureeMin} minutes**. **${removedRoleIds.length}** role(s) retire(s).`)
+          .setFooter({ text: 'Reflechis a tes actes.' })] });
 
         if (prisonChannel) {
-          await prisonChannel.send({
-            content: `<@${target.id}>`,
-            embeds: [embed('#FF4444')
-              .setTitle('Jail automatique')
-              .setDescription(`Tu as accumule 3 warns. Tu es emprisonne pour **${dureeMin} min**.\nTu n'as acces qu'a ce salon. Tes roles seront restaures a la liberation.`)
-            ],
-          });
+          await prisonChannel.send({ content: `<@${target.id}>`, embeds: [embed('#FF4444').setTitle('Jail automatique')
+            .setDescription(`Tu as accumule 3 warns. Tu es emprisonne pour **${dureeMin} min**.\nTu n'as acces qu'a ce salon. Tes roles seront restaures a la liberation.`)] });
         }
 
         await logSanction(message.guild, [
-          { name: 'Membre',         value: `<@${target.id}>`,          inline: true },
-          { name: 'Duree',          value: `${dureeMin} min`,           inline: true },
-          { name: 'Roles retires',  value: `${removedRoleIds.length}`,  inline: true },
-          { name: 'Motif',          value: 'Auto-jail (3 warns)',        inline: false },
+          { name: 'Membre',        value: `<@${target.id}>`,         inline: true },
+          { name: 'Duree',         value: `${dureeMin} min`,          inline: true },
+          { name: 'Roles retires', value: `${removedRoleIds.length}`, inline: true },
+          { name: 'Motif',         value: 'Auto-jail (3 warns)',      inline: false },
         ], `Jail auto -- ${target.user.tag}`, '#FF4444');
 
         setTimeout(async () => {
@@ -622,22 +596,14 @@ const commands = {
             const member = await message.guild.members.fetch(target.id).catch(() => null);
             if (!member) { delete jailsData[target.id]; saveJails(); return; }
             const saved = jailsData[target.id];
-            if (saved) {
-              await unjailMember(member, saved.savedRoleIds || [], 'Liberation automatique apres jail');
-            }
-            delete jailsData[target.id];
-            saveJails();
+            if (saved) await unjailMember(member, saved.savedRoleIds || [], 'Liberation automatique apres jail');
+            delete jailsData[target.id]; saveJails();
             if (prisonChannel) {
-              await prisonChannel.send({
-                embeds: [embed('#00FF66').setTitle('Libere !').setDescription(`<@${target.id}> a ete libere automatiquement. Ses roles ont ete restaures.`)],
-              });
+              await prisonChannel.send({ embeds: [embed('#00FF66').setTitle('Libere !').setDescription(`<@${target.id}> a ete libere automatiquement. Ses roles ont ete restaures.`)] });
             }
           } catch (err) { console.error('[AUTO-JAIL] Erreur liberation :', err.message); }
         }, CONFIG.JAIL_DURATION_MS);
-
-      } catch (err) {
-        console.error('[WARN AUTO-JAIL] Erreur :', err.message);
-      }
+      } catch (err) { console.error('[WARN AUTO-JAIL] Erreur :', err.message); }
     }
   },
 
@@ -651,9 +617,7 @@ const commands = {
       value: `${w.reason}\n<@${w.by}>`,
       inline: false,
     }));
-    await message.reply({
-      embeds: [embed('#FFA500').setTitle(`Warns de ${target.displayName} -- ${list.length}/3`).addFields(fields)],
-    });
+    await message.reply({ embeds: [embed('#FFA500').setTitle(`Warns de ${target.displayName} -- ${list.length}/3`).addFields(fields)] });
   },
 
   '!clearwarns': async (message) => {
@@ -661,8 +625,7 @@ const commands = {
     const target = message.mentions.members.first();
     if (!target) return message.reply('Mentionne un utilisateur : `!clearwarns @user`');
     const before = warnsData[target.id]?.length || 0;
-    delete warnsData[target.id];
-    saveWarns();
+    delete warnsData[target.id]; saveWarns();
     await message.reply(`**${before}** warn(s) supprime(s) pour <@${target.id}>.`);
     await logSanction(message.guild, [
       { name: 'Membre',    value: `<@${target.id}>`,          inline: true },
@@ -671,40 +634,31 @@ const commands = {
     ], `Warns effaces -- ${target.user.tag}`, '#00FF66');
   },
 
-  // EXPIREDJAILS
+  // ── EXPIREDJAILS ─────────────────────────────────────────────
   '!expiredjails': async (message) => {
     if (!isAdmin(message.author.id)) return message.reply('Permission refusee.');
     const active = Object.entries(jailsData);
     if (active.length === 0) return message.reply('Aucun jail actif en ce moment.');
-    const now = Date.now();
+    const now    = Date.now();
     const fields = active.map(([userId, data]) => {
-      const remaining = data.until - now;
-      const displayTime = remaining > 0
-        ? `${Math.ceil(remaining / 1000 / 60)} min restante(s)`
-        : 'Liberation en attente...';
-      const rolesCount = data.savedRoleIds?.length ?? (data.hadRole ? 1 : 0);
-      return {
-        name: `<@${userId}>`,
-        value: `${displayTime}\nFin : ${new Date(data.until).toLocaleTimeString('fr-FR')}\n${rolesCount} role(s) sauvegarde(s)`,
-        inline: true,
-      };
+      const remaining   = data.until - now;
+      const displayTime = remaining > 0 ? `${Math.ceil(remaining / 1000 / 60)} min restante(s)` : 'Liberation en attente...';
+      const rolesCount  = data.savedRoleIds?.length ?? (data.hadRole ? 1 : 0);
+      return { name: `<@${userId}>`, value: `${displayTime}\nFin : ${new Date(data.until).toLocaleTimeString('fr-FR')}\n${rolesCount} role(s) sauvegarde(s)`, inline: true };
     });
-    await message.reply({
-      embeds: [embed('#FF4444').setTitle(`Jails actifs -- ${active.length} membre(s)`).addFields(fields)],
-    });
+    await message.reply({ embeds: [embed('#FF4444').setTitle(`Jails actifs -- ${active.length} membre(s)`).addFields(fields)] });
   },
 
-  // SANCTION LOG
+  // ── SANCTION LOG ─────────────────────────────────────────────
   '!sanction-log': async (message) => {
     if (!isAdmin(message.author.id)) return message.reply('Permission refusee.');
     const channel = message.mentions.channels.first();
     if (!channel) return message.reply('Mentionne un salon : `!sanction-log <#channel>`');
-    sanctionLogData.channelId = channel.id;
-    saveSanctionLog();
+    sanctionLogData.channelId = channel.id; saveSanctionLog();
     await message.reply(`Salon de logs des sanctions defini : ${channel}`);
   },
 
-  // JAIL
+  // ── JAIL ─────────────────────────────────────────────────────
   '!jail': async (message) => {
     if (!isAdmin(message.author.id)) return message.reply('Permission refusee.');
     const target = message.mentions.members.first();
@@ -717,218 +671,123 @@ const commands = {
 
     try {
       const removedRoleIds = await jailMember(target, `Jail par ${message.author.tag}`);
-
-      jailsData[target.id] = {
-        until: Date.now() + CONFIG.JAIL_DURATION_MS,
-        savedRoleIds: removedRoleIds,
-        hadRole: removedRoleIds.includes(CONFIG.JAIL_ACCESS_ROLE_ID),
-        guildId: message.guild.id,
-      };
+      jailsData[target.id] = { until: Date.now() + CONFIG.JAIL_DURATION_MS, savedRoleIds: removedRoleIds, hadRole: removedRoleIds.includes(CONFIG.JAIL_ACCESS_ROLE_ID), guildId: message.guild.id };
       saveJails();
 
-      const jailEmbed = embed('#FF4444')
-        .setTitle('Emprisonne !')
-        .setDescription(
-          `<@${target.id}> a ete envoye en prison par <@${message.author.id}>.\n` +
-          `**${removedRoleIds.length}** role(s) retire(s) -- tous restaures automatiquement dans **${dureeMin} min**.\n\n` +
-          `Seul ${prisonMention} reste accessible.`
-        )
+      await message.reply({ embeds: [embed('#FF4444').setTitle('Emprisonne !')
+        .setDescription(`<@${target.id}> envoye en prison par <@${message.author.id}>.\n**${removedRoleIds.length}** role(s) retire(s) -- restaures dans **${dureeMin} min**.\n\nSeul ${prisonMention} reste accessible.`)
         .addFields(
-          { name: 'Par',            value: `<@${message.author.id}>`,    inline: true },
-          { name: 'Duree',          value: `${dureeMin} min`,             inline: true },
-          { name: 'Roles retires',  value: `${removedRoleIds.length}`,    inline: true },
-        )
-        .setFooter({ text: 'Reflechis a tes actes.' });
-
-      await message.reply({ embeds: [jailEmbed] });
+          { name: 'Par',           value: `<@${message.author.id}>`, inline: true },
+          { name: 'Duree',         value: `${dureeMin} min`,          inline: true },
+          { name: 'Roles retires', value: `${removedRoleIds.length}`, inline: true },
+        ).setFooter({ text: 'Reflechis a tes actes.' })] });
 
       if (prisonChannel) {
-        await prisonChannel.send({
-          content: `<@${target.id}>`,
-          embeds: [embed('#FF4444')
-            .setTitle('Tu es en prison')
-            .setDescription(
-              `Tu as ete emprisonne par <@${message.author.id}>.\n` +
-              `Tu n'as acces qu'a ce salon pendant **${dureeMin} minute${dureeMin > 1 ? 's' : ''}**.\n` +
-              `Tous tes roles seront restaures a la liberation.`
-            )
-          ],
-        });
+        await prisonChannel.send({ content: `<@${target.id}>`, embeds: [embed('#FF4444').setTitle('Tu es en prison')
+          .setDescription(`Tu as ete emprisonne par <@${message.author.id}>.\nTu n'as acces qu'a ce salon pendant **${dureeMin} minute${dureeMin > 1 ? 's' : ''}**.\nTous tes roles seront restaures a la liberation.`)] });
       }
 
       await logSanction(message.guild, [
-        { name: 'Membre',         value: `<@${target.id}>`,          inline: true },
-        { name: 'Par',            value: `<@${message.author.id}>`,  inline: true },
-        { name: 'Duree',          value: `${dureeMin} min`,           inline: true },
-        { name: 'Roles retires',  value: `${removedRoleIds.length}`,   inline: true },
+        { name: 'Membre',        value: `<@${target.id}>`,          inline: true },
+        { name: 'Par',           value: `<@${message.author.id}>`,  inline: true },
+        { name: 'Duree',         value: `${dureeMin} min`,           inline: true },
+        { name: 'Roles retires', value: `${removedRoleIds.length}`, inline: true },
       ], `Jail -- ${target.user.tag}`, '#FF4444');
-
-      console.log(`[JAIL] ${target.user.tag} emprisonne (${removedRoleIds.length} roles retires) -- ${dureeMin} min`);
 
       setTimeout(async () => {
         try {
           const member = await message.guild.members.fetch(target.id).catch(() => null);
           if (!member) { delete jailsData[target.id]; saveJails(); return; }
           const saved = jailsData[target.id];
-          if (saved) {
-            await unjailMember(member, saved.savedRoleIds || [], 'Liberation automatique apres jail');
-          }
-          delete jailsData[target.id];
-          saveJails();
+          if (saved) await unjailMember(member, saved.savedRoleIds || [], 'Liberation automatique apres jail');
+          delete jailsData[target.id]; saveJails();
           if (prisonChannel) {
-            await prisonChannel.send({
-              embeds: [embed('#00FF66')
-                .setTitle('Libere !')
-                .setDescription(`<@${target.id}> a purge sa peine. Tous ses roles ont ete restaures.`)
-              ],
-            });
+            await prisonChannel.send({ embeds: [embed('#00FF66').setTitle('Libere !').setDescription(`<@${target.id}> a purge sa peine. Tous ses roles ont ete restaures.`)] });
           }
-          console.log(`[JAIL] ${target.user.tag} libere -- roles restaures.`);
         } catch (err) { console.error('[JAIL] Erreur liberation :', err.message); }
       }, CONFIG.JAIL_DURATION_MS);
-
     } catch (err) { await message.reply(`Erreur : ${err.message}`); }
   },
 
-  // TOURNOI
+  // ── TOURNOI ──────────────────────────────────────────────────
   '!tournoi-start': async (message, args) => {
     if (!isAdmin(message.author.id)) return message.reply('Permission refusee.');
-
     const photoChannel = message.mentions.channels.first();
     if (!photoChannel) return message.reply('Mentionne le salon photos : `!tournoi-start <#channel-photos>`');
 
     const activeTournament = Object.values(tournamentsData).find(t => t.status === 'active');
-    if (activeTournament) {
-      return message.reply(`Un tournoi est deja en cours (ID: \`${activeTournament.id}\`). Utilise \`!tournoi-cancel\` pour l'annuler.`);
-    }
+    if (activeTournament) return message.reply(`Un tournoi est deja en cours (ID: \`${activeTournament.id}\`). Utilise \`!tournoi-cancel\` pour l'annuler.`);
 
     await message.reply('Recuperation des photos en cours...');
 
-    let allMessages = [];
-    let lastId = null;
-    let fetchMore = true;
-
+    let allMessages = []; let lastId = null; let fetchMore = true;
     while (fetchMore) {
       const options = { limit: 100 };
       if (lastId) options.before = lastId;
-
       const batch = await photoChannel.messages.fetch(options).catch(() => null);
       if (!batch || batch.size === 0) break;
-
       allMessages.push(...batch.values());
       lastId = batch.last().id;
       fetchMore = batch.size === 100;
-
       if (allMessages.length >= 1000) break;
     }
 
     const imageExtensions = /\.(jpg|jpeg|png|gif|webp)(\?.*)?$/i;
-    const participants = [];
-    const seenUsers = new Set();
-
+    const participants = []; const seenUsers = new Set();
     for (const msg of allMessages) {
       if (msg.author.bot) continue;
-
-      const imageAttachment = msg.attachments.find(att =>
-        att.contentType?.startsWith('image/') ||
-        imageExtensions.test(att.url)
-      );
-
+      const imageAttachment = msg.attachments.find(att => att.contentType?.startsWith('image/') || imageExtensions.test(att.url));
       if (imageAttachment && !seenUsers.has(msg.author.id)) {
         seenUsers.add(msg.author.id);
-        participants.push({
-          userId: msg.author.id,
-          username: msg.member?.displayName || msg.author.username,
-          imageUrl: imageAttachment.url,
-          messageId: msg.id,
-        });
+        participants.push({ userId: msg.author.id, username: msg.member?.displayName || msg.author.username, imageUrl: imageAttachment.url, messageId: msg.id });
       }
     }
 
-    if (participants.length < 2) {
-      return message.reply('Pas assez de participants avec des photos dans ce salon (minimum 2 requis).');
-    }
+    if (participants.length < 2) return message.reply('Pas assez de participants (minimum 2).');
 
     const tournamentId = Date.now().toString(36);
     const firstRoundPairs = buildRound(participants);
-
     tournamentsData[tournamentId] = {
-      id: tournamentId,
-      status: 'active',
-      hostChannelId: message.channel.id,
-      photoChannelId: photoChannel.id,
-      participants: participants,
-      currentRound: 1,
-      currentMatchIndex: 0,
-      currentPairs: firstRoundPairs,
-      roundWinners: [],
-      allRoundWinners: [],
-      history: [],
-      startedBy: message.author.id,
-      startedAt: new Date().toISOString(),
-      currentVoteMessageId: null,
+      id: tournamentId, status: 'active', hostChannelId: message.channel.id, photoChannelId: photoChannel.id,
+      participants, currentRound: 1, currentMatchIndex: 0, currentPairs: firstRoundPairs,
+      roundWinners: [], allRoundWinners: [], history: [], startedBy: message.author.id,
+      startedAt: new Date().toISOString(), currentVoteMessageId: null,
     };
     saveTournaments();
 
-    const startEmbed = embed('#FFD700')
-      .setTitle('Tournoi Physique -- Debut !')
-      .setDescription(
-        `Le tournoi demarre avec **${participants.length} participant(s)** !\n\n` +
-        `Photos recuperees depuis ${photoChannel}\n` +
-        `Seule **1 photo par personne** est retenue (la plus recente).`
-      )
+    await message.channel.send({ embeds: [embed('#FFD700').setTitle('Tournoi Physique -- Debut !')
+      .setDescription(`Le tournoi demarre avec **${participants.length} participant(s)** !\n\nPhotos recuperees depuis ${photoChannel}\nSeule **1 photo par personne** est retenue.`)
       .addFields(
-        { name: 'Participants', value: participants.map(p => `<@${p.userId}>`).join(', ').slice(0, 1024), inline: false },
-        { name: 'Matchs au 1er tour', value: `${firstRoundPairs.filter(p => p[1] !== null).length} match(s)`, inline: true },
-        { name: 'Format', value: 'Elimination directe', inline: true },
-      )
-      .setFooter({ text: `Tournoi #${tournamentId} -- Lance par ${message.author.tag}` });
-
-    await message.channel.send({ embeds: [startEmbed] });
+        { name: 'Participants',       value: participants.map(p => `<@${p.userId}>`).join(', ').slice(0, 1024), inline: false },
+        { name: 'Matchs au 1er tour', value: `${firstRoundPairs.filter(p => p[1] !== null).length} match(s)`,   inline: true  },
+        { name: 'Format',             value: 'Elimination directe',                                               inline: true  },
+      ).setFooter({ text: `Tournoi #${tournamentId} -- Lance par ${message.author.tag}` })] });
     await advanceTournament(tournamentId, message.channel);
   },
 
   '!tournoi-status': async (message) => {
     if (!isAdmin(message.author.id)) return message.reply('Permission refusee.');
-
     const activeTournament = Object.values(tournamentsData).find(t => t.status === 'active');
     if (!activeTournament) return message.reply('Aucun tournoi en cours.');
-
     const t = activeTournament;
-    const totalMatches = t.currentPairs.filter(p => p[1] !== null).length;
-    const doneMatches = t.currentMatchIndex;
-
-    const statusEmbed = embed('#FFD700')
-      .setTitle(`Tournoi #${t.id} -- Round ${t.currentRound}`)
-      .addFields(
-        { name: 'Progression',     value: `Match ${doneMatches}/${totalMatches}`,                     inline: true },
-        { name: 'Participants',    value: `${t.participants.length}`,                                 inline: true },
-        { name: `Qualifies (R${t.currentRound})`, value: `${t.roundWinners.length}`,                inline: true },
-        { name: 'Lance par',       value: `<@${t.startedBy}>`,                                       inline: true },
-        { name: 'Demarre le',      value: new Date(t.startedAt).toLocaleString('fr-FR'),             inline: true },
-      );
-
-    await message.reply({ embeds: [statusEmbed] });
+    await message.reply({ embeds: [embed('#FFD700').setTitle(`Tournoi #${t.id} -- Round ${t.currentRound}`).addFields(
+      { name: 'Progression',                         value: `Match ${t.currentMatchIndex}/${t.currentPairs.filter(p => p[1] !== null).length}`, inline: true },
+      { name: 'Participants',                        value: `${t.participants.length}`,                                                          inline: true },
+      { name: `Qualifies (R${t.currentRound})`,     value: `${t.roundWinners.length}`,                                                          inline: true },
+      { name: 'Lance par',                           value: `<@${t.startedBy}>`,                                                                 inline: true },
+      { name: 'Demarre le',                          value: new Date(t.startedAt).toLocaleString('fr-FR'),                                       inline: true },
+    )] });
   },
 
   '!tournoi-cancel': async (message) => {
     if (!isAdmin(message.author.id)) return message.reply('Permission refusee.');
-
     const activeTournament = Object.values(tournamentsData).find(t => t.status === 'active');
     if (!activeTournament) return message.reply('Aucun tournoi en cours.');
-
-    activeTournament.status = 'cancelled';
-    saveTournaments();
-
-    await message.reply({
-      embeds: [embed('#FF4444')
-        .setTitle('Tournoi annule')
-        .setDescription(`Le tournoi #${activeTournament.id} a ete annule par <@${message.author.id}>.`)
-      ],
-    });
+    activeTournament.status = 'cancelled'; saveTournaments();
+    await message.reply({ embeds: [embed('#FF4444').setTitle('Tournoi annule').setDescription(`Le tournoi #${activeTournament.id} a ete annule par <@${message.author.id}>.`)] });
   },
 
-  // NPC
+  // ── NPC ──────────────────────────────────────────────────────
   '!npc': async (message) => {
     if (!isAdmin(message.author.id)) return message.reply('Permission refusee.');
     const target = message.mentions.members.first();
@@ -938,78 +797,55 @@ const commands = {
     const NPC_DURATION_MS = 10 * 60 * 1000;
     const dureeMin = Math.round(NPC_DURATION_MS / 60000);
     const originalNick = target.nickname || target.user.username;
-    const npcNames = [
-      'NPC #4782', 'NPC #0001', 'NPC Villageois', 'NPC Background',
-      'NPC Sans Cerveau', 'NPC Scriptless', 'NPC Fluide', 'NPC Cope Dealer',
-    ];
+    const npcNames = ['NPC #4782', 'NPC #0001', 'NPC Villageois', 'NPC Background', 'NPC Sans Cerveau', 'NPC Scriptless', 'NPC Fluide', 'NPC Cope Dealer'];
     const newNick = npcNames[Math.floor(Math.random() * npcNames.length)];
 
     try {
       await target.setNickname(newNick, `NPC par ${message.author.tag}`);
-      npcList[target.id] = { originalNick, until: Date.now() + NPC_DURATION_MS, guildId: message.guild.id };
-      saveNpcList();
-
-      const npcEmbed = embed('#95A5A6')
-        .setTitle('Statut NPC active')
-        .setDescription(
-          `<@${target.id}> est desormais un **NPC** pour les **${dureeMin} prochaines minutes**.\n\n` +
-          `Ses messages seront traites comme des *interactions scriptees sans valeur cognitive*.`
-        )
+      npcList[target.id] = { originalNick, until: Date.now() + NPC_DURATION_MS, guildId: message.guild.id }; saveNpcList();
+      await message.reply({ embeds: [embed('#95A5A6').setTitle('Statut NPC active')
+        .setDescription(`<@${target.id}> est desormais un **NPC** pour les **${dureeMin} prochaines minutes**.`)
         .addFields(
-          { name: 'Nouveau pseudo', value: newNick,                     inline: true },
-          { name: 'Par',            value: `<@${message.author.id}>`,   inline: true },
-          { name: 'Duree',          value: `${dureeMin} min`,            inline: true },
-        )
-        .setFooter({ text: 'NPC Mode -- Retour a la conscience dans quelques minutes.' });
-
-      await message.reply({ embeds: [npcEmbed] });
-
+          { name: 'Nouveau pseudo', value: newNick,                    inline: true },
+          { name: 'Par',            value: `<@${message.author.id}>`,  inline: true },
+          { name: 'Duree',          value: `${dureeMin} min`,           inline: true },
+        ).setFooter({ text: 'NPC Mode -- Retour a la conscience dans quelques minutes.' })] });
       await logSanction(message.guild, [
-        { name: 'Membre', value: `<@${target.id}>`,          inline: true },
-        { name: 'Par',    value: `<@${message.author.id}>`,  inline: true },
-        { name: 'Duree',  value: `${dureeMin} min`,           inline: true },
+        { name: 'Membre', value: `<@${target.id}>`,         inline: true },
+        { name: 'Par',    value: `<@${message.author.id}>`, inline: true },
+        { name: 'Duree',  value: `${dureeMin} min`,          inline: true },
       ], `NPC -- ${target.user.tag}`, '#95A5A6');
-
       setTimeout(async () => {
         try {
           const member = await message.guild.members.fetch(target.id).catch(() => null);
           if (!member) { delete npcList[target.id]; saveNpcList(); return; }
           const saved = npcList[target.id];
-          const restore = saved?.originalNick === target.user.username ? null : saved?.originalNick;
-          await member.setNickname(restore, 'Fin du statut NPC');
-          delete npcList[target.id];
-          saveNpcList();
+          await member.setNickname(saved?.originalNick === target.user.username ? null : saved?.originalNick, 'Fin du statut NPC');
+          delete npcList[target.id]; saveNpcList();
         } catch (err) { console.error('[NPC] Erreur restauration pseudo :', err.message); }
       }, NPC_DURATION_MS);
-
     } catch (err) { await message.reply(`Erreur : ${err.message}`); }
   },
 
-  // RESETPSEUDO
+  // ── RESETPSEUDO ──────────────────────────────────────────────
   '!resetpseudo': async (message) => {
     if (!isAdmin(message.author.id)) return message.reply('Permission refusee.');
     const target = message.mentions.members.first();
     if (!target) return message.reply('Mentionne un utilisateur : `!resetpseudo @user`');
-
     try {
       const oldNick = target.nickname || '*aucun surnom*';
       await target.setNickname(null, `Reset pseudo par ${message.author.tag}`);
       if (npcList[target.id]) { delete npcList[target.id]; saveNpcList(); }
       if (tfList[target.id])  { delete tfList[target.id];  saveTfList();  }
-      await message.reply({
-        embeds: [embed('#00FF66')
-          .setTitle('Pseudo reinitialise')
-          .addFields(
-            { name: 'Membre',        value: `<@${target.id}>`,          inline: true },
-            { name: 'Ancien pseudo', value: oldNick,                     inline: true },
-            { name: 'Par',           value: `<@${message.author.id}>`,  inline: true },
-          )
-        ],
-      });
+      await message.reply({ embeds: [embed('#00FF66').setTitle('Pseudo reinitialise').addFields(
+        { name: 'Membre',        value: `<@${target.id}>`,         inline: true },
+        { name: 'Ancien pseudo', value: oldNick,                    inline: true },
+        { name: 'Par',           value: `<@${message.author.id}>`, inline: true },
+      )] });
     } catch (err) { await message.reply(`Erreur : ${err.message}`); }
   },
 
-  // TF
+  // ── TF ───────────────────────────────────────────────────────
   '!tf': async (message) => {
     if (!isAdmin(message.author.id)) return message.reply('Permission refusee.');
     const target = message.mentions.members.first();
@@ -1019,61 +855,43 @@ const commands = {
     const TF_DURATION_MS = 10 * 60 * 1000;
     const dureeMin = Math.round(TF_DURATION_MS / 60000);
     const originalNick = target.nickname || target.user.username;
-    const tfNames = [
-      'Le Copeur Certifie', 'M. Fluide 2024', 'Natty Suspect #1',
-      'Le Roi du Fenugrec', 'Monsieur Maingain', 'Le Bulk Eternel',
-      'Prince du Cope', 'IQ Test Echoue', 'Fonte Imaginaire',
-      'Background NPC', 'Zyzz Rate', 'Le Sourceur',
-      'Hgh Anonymous', 'Mr. Overdose Creatine', 'Amateur de MK677',
-    ];
+    const tfNames = ['Le Copeur Certifie', 'M. Fluide 2024', 'Natty Suspect #1', 'Le Roi du Fenugrec', 'Monsieur Maingain', 'Le Bulk Eternel', 'Prince du Cope', 'IQ Test Echoue', 'Fonte Imaginaire', 'Background NPC', 'Zyzz Rate', 'Le Sourceur', 'Hgh Anonymous', 'Mr. Overdose Creatine', 'Amateur de MK677'];
     const newNick = tfNames[Math.floor(Math.random() * tfNames.length)];
 
     try {
       await target.setNickname(newNick, `TF par ${message.author.tag}`);
-      tfList[target.id] = { originalNick, until: Date.now() + TF_DURATION_MS, guildId: message.guild.id };
-      saveTfList();
-
-      const tfEmbed = embed('#9B59B6')
-        .setTitle('Transformation activee')
+      tfList[target.id] = { originalNick, until: Date.now() + TF_DURATION_MS, guildId: message.guild.id }; saveTfList();
+      await message.reply({ embeds: [embed('#9B59B6').setTitle('Transformation activee')
         .setDescription(`<@${target.id}> a ete transforme pour **${dureeMin} minutes**.`)
         .addFields(
           { name: 'Ancien pseudo',  value: originalNick,              inline: true },
           { name: 'Nouveau pseudo', value: newNick,                   inline: true },
           { name: 'Par',            value: `<@${message.author.id}>`, inline: true },
           { name: 'Duree',          value: `${dureeMin} min`,          inline: true },
-        )
-        .setFooter({ text: 'TF Mode -- Identite temporairement confisquee.' });
-
-      await message.reply({ embeds: [tfEmbed] });
-
+        ).setFooter({ text: 'TF Mode -- Identite temporairement confisquee.' })] });
       await logSanction(message.guild, [
-        { name: 'Membre',         value: `<@${target.id}>`,          inline: true },
-        { name: 'Nouveau pseudo', value: newNick,                    inline: true },
-        { name: 'Par',            value: `<@${message.author.id}>`,  inline: true },
+        { name: 'Membre',         value: `<@${target.id}>`,         inline: true },
+        { name: 'Nouveau pseudo', value: newNick,                   inline: true },
+        { name: 'Par',            value: `<@${message.author.id}>`, inline: true },
       ], `TF -- ${target.user.tag}`, '#9B59B6');
-
       setTimeout(async () => {
         try {
           const member = await message.guild.members.fetch(target.id).catch(() => null);
           if (!member) { delete tfList[target.id]; saveTfList(); return; }
           const saved = tfList[target.id];
-          const restore = saved?.originalNick === target.user.username ? null : saved?.originalNick;
-          await member.setNickname(restore, 'Fin du TF');
-          delete tfList[target.id];
-          saveTfList();
+          await member.setNickname(saved?.originalNick === target.user.username ? null : saved?.originalNick, 'Fin du TF');
+          delete tfList[target.id]; saveTfList();
         } catch (err) { console.error('[TF] Erreur restauration pseudo :', err.message); }
       }, TF_DURATION_MS);
-
     } catch (err) { await message.reply(`Erreur : ${err.message}`); }
   },
 
-  // TICKETS
+  // ── TICKETS ──────────────────────────────────────────────────
   '!ticket-setrole': async (message) => {
     if (!isAdmin(message.author.id)) return message.reply('Permission refusee.');
     const role = message.mentions.roles.first();
     if (!role) return message.reply('Mentionne un role. Exemple : `!ticket-setrole @Membres`');
-    ticketConfig.viewRoleId = role.id;
-    saveTicketConfig();
+    ticketConfig.viewRoleId = role.id; saveTicketConfig();
     await message.reply(`Role viewer des tickets defini : <@&${role.id}>`);
   },
 
@@ -1081,20 +899,16 @@ const commands = {
     if (!isAdmin(message.author.id)) return message.reply('Permission refusee.');
     const role = message.mentions.roles.first();
     if (!role) return message.reply('Mentionne un role. Exemple : `!ticket-setstaff @Staff`');
-    ticketConfig.staffRoleId = role.id;
-    saveTicketConfig();
+    ticketConfig.staffRoleId = role.id; saveTicketConfig();
     await message.reply(`Role staff des tickets defini : <@&${role.id}>`);
   },
 
   '!ticket-config': async (message) => {
     if (!isAdmin(message.author.id)) return message.reply('Permission refusee.');
-    const e = embed('#00FF66')
-      .setTitle('Configuration des tickets')
-      .addFields(
-        { name: 'Role viewer', value: ticketConfig.viewRoleId  ? `<@&${ticketConfig.viewRoleId}>`  : 'Non defini', inline: false },
-        { name: 'Role staff',  value: ticketConfig.staffRoleId ? `<@&${ticketConfig.staffRoleId}>` : 'Non defini', inline: false },
-      );
-    await message.reply({ embeds: [e] });
+    await message.reply({ embeds: [embed('#00FF66').setTitle('Configuration des tickets').addFields(
+      { name: 'Role viewer', value: ticketConfig.viewRoleId  ? `<@&${ticketConfig.viewRoleId}>`  : 'Non defini', inline: false },
+      { name: 'Role staff',  value: ticketConfig.staffRoleId ? `<@&${ticketConfig.staffRoleId}>` : 'Non defini', inline: false },
+    )] });
   },
 
   '!ticket': async (message, args) => {
@@ -1124,24 +938,17 @@ const commands = {
       } catch { console.warn(`[TICKET] Admin ${adminId} introuvable, ignore.`); }
     }
     try {
-      const channel = await guild.channels.create({
-        name: `ticket-${ticketNumber}`, type: 0,
-        permissionOverwrites: overwrites,
-        reason: `Ticket #${ticketNumber} ouvert par ${message.author.tag}`,
-      });
-      ticketsData[channel.id] = { openerId: message.author.id, openerTag: message.author.tag, ticketNumber, motif, openedAt: new Date().toISOString() };
-      saveTickets();
+      const channel = await guild.channels.create({ name: `ticket-${ticketNumber}`, type: 0, permissionOverwrites: overwrites, reason: `Ticket #${ticketNumber} ouvert par ${message.author.tag}` });
+      ticketsData[channel.id] = { openerId: message.author.id, openerTag: message.author.tag, ticketNumber, motif, openedAt: new Date().toISOString() }; saveTickets();
       const staffMention = ticketConfig.staffRoleId ? `<@&${ticketConfig.staffRoleId}>` : '';
-      const ticketEmbed = embed('#00FF66')
-        .setTitle(`Ticket #${ticketNumber}`)
-        .setDescription('Le staff va traiter ta demande sous 24h.\n\n> Pour fermer ce ticket, utilise `!fermer`')
-        .addFields({ name: 'Ouvert par', value: `<@${message.author.id}>`, inline: true }, { name: 'Motif', value: motif, inline: false })
-        .setFooter({ text: `Ticket #${ticketNumber}` });
-      await channel.send({ content: `<@${message.author.id}>${staffMention ? ` ${staffMention}` : ''}`, embeds: [ticketEmbed] });
+      await channel.send({ content: `<@${message.author.id}>${staffMention ? ` ${staffMention}` : ''}`,
+        embeds: [embed('#00FF66').setTitle(`Ticket #${ticketNumber}`)
+          .setDescription('Le staff va traiter ta demande sous 24h.\n\n> Pour fermer ce ticket, utilise `!fermer`')
+          .addFields({ name: 'Ouvert par', value: `<@${message.author.id}>`, inline: true }, { name: 'Motif', value: motif, inline: false })
+          .setFooter({ text: `Ticket #${ticketNumber}` })] });
       const confirmMsg = await message.channel.send(`Ton ticket a ete cree : ${channel}`).catch(() => null);
       if (confirmMsg) setTimeout(() => confirmMsg.delete().catch(() => {}), 6000);
     } catch (error) {
-      console.error('Erreur creation ticket:', error);
       const errMsg = await message.channel.send(`Impossible de creer le ticket : ${error.message}`).catch(() => null);
       if (errMsg) setTimeout(() => errMsg.delete().catch(() => {}), 6000);
     }
@@ -1149,8 +956,7 @@ const commands = {
 
   '!fermer': async (message) => {
     try { await message.delete(); } catch {}
-    const channelId  = message.channel.id;
-    const ticketInfo = ticketsData[channelId];
+    const ticketInfo = ticketsData[message.channel.id];
     if (!ticketInfo) {
       const errMsg = await message.channel.send('Cette commande ne peut etre utilisee que dans un salon ticket.').catch(() => null);
       if (errMsg) setTimeout(() => errMsg.delete().catch(() => {}), 5000);
@@ -1162,21 +968,15 @@ const commands = {
       if (errMsg) setTimeout(() => errMsg.delete().catch(() => {}), 5000);
       return;
     }
-    const closeEmbed = embed('#FF4444')
-      .setTitle('Ticket ferme')
+    await message.channel.send({ embeds: [embed('#FF4444').setTitle('Ticket ferme')
       .setDescription(`Ce ticket a ete ferme par <@${message.author.id}>.\n\nLe salon sera supprime dans **5 secondes**.`)
       .addFields({ name: 'Ouvert par', value: `<@${ticketInfo.openerId}>`, inline: true }, { name: 'Motif', value: ticketInfo.motif, inline: false })
-      .setFooter({ text: `Ticket #${ticketInfo.ticketNumber}` });
-    await message.channel.send({ embeds: [closeEmbed] }).catch(() => {});
-    delete ticketsData[channelId];
-    saveTickets();
-    setTimeout(async () => {
-      try { await message.channel.delete(`Ticket ferme par ${message.author.tag}`); }
-      catch (err) { console.error('[FERMER] Erreur suppression salon :', err.message); }
-    }, 5000);
+      .setFooter({ text: `Ticket #${ticketInfo.ticketNumber}` })] }).catch(() => {});
+    delete ticketsData[message.channel.id]; saveTickets();
+    setTimeout(async () => { try { await message.channel.delete(`Ticket ferme par ${message.author.tag}`); } catch (err) { console.error('[FERMER] Erreur suppression salon :', err.message); } }, 5000);
   },
 
-  // REACTION ROLES
+  // ── REACTION ROLES ───────────────────────────────────────────
   '!rr-setup': async (message, args) => {
     if (!isAdmin(message.author.id)) return message.reply('Permission refusee.');
     const parts = args.join(' ').split('|').map(s => s.trim());
@@ -1185,14 +985,10 @@ const commands = {
     if (!targetChannel) return message.reply('Mentionne un channel valide.');
     const titre       = parts[1];
     const description = parts[2] || 'Reagis avec les emojis ci-dessous pour obtenir tes roles !';
-    const rrEmbed = embed('#7289DA')
-      .setTitle(`${titre}`)
-      .setDescription(description)
+    const sent = await targetChannel.send({ embeds: [embed('#7289DA').setTitle(titre).setDescription(description)
       .addFields({ name: 'Roles disponibles', value: '*Aucun role configure pour l\'instant.*', inline: false })
-      .setFooter({ text: 'Reagis pour obtenir un role - Retire ta reaction pour le perdre' });
-    const sent = await targetChannel.send({ embeds: [rrEmbed] });
-    reactionRolesData[sent.id] = { channelId: targetChannel.id, titre, description, roles: {}, existingMessage: false };
-    saveReactionRoles();
+      .setFooter({ text: 'Reagis pour obtenir un role - Retire ta reaction pour le perdre' })] });
+    reactionRolesData[sent.id] = { channelId: targetChannel.id, titre, description, roles: {}, existingMessage: false }; saveReactionRoles();
     await message.reply(`Message de reaction role cree dans ${targetChannel} !\nID : \`${sent.id}\``);
   },
 
@@ -1211,8 +1007,7 @@ const commands = {
     try { targetMessage = await targetChannel.messages.fetch(messageId); }
     catch { return message.reply(`Message introuvable avec l'ID \`${messageId}\` dans ${targetChannel}.`); }
     if (reactionRolesData[messageId]) return message.reply('Ce message est deja enregistre comme reaction role.');
-    reactionRolesData[messageId] = { channelId: targetChannel.id, titre, description, roles: {}, existingMessage: true };
-    saveReactionRoles();
+    reactionRolesData[messageId] = { channelId: targetChannel.id, titre, description, roles: {}, existingMessage: true }; saveReactionRoles();
     await message.reply(`Message \`${messageId}\` enregistre comme reaction role dans ${targetChannel} !`);
   },
 
@@ -1220,9 +1015,8 @@ const commands = {
     if (!isAdmin(message.author.id)) return message.reply('Permission refusee.');
     const parts = args.join(' ').split('|').map(s => s.trim());
     if (parts.length < 3) return message.reply('Format : `!rr-add <messageID> | <emoji> | <@role>`');
-    const messageId = parts[0];
-    const emoji     = parts[1];
-    const role      = message.mentions.roles.first();
+    const messageId = parts[0]; const emoji = parts[1];
+    const role = message.mentions.roles.first();
     if (!role) return message.reply('Mentionne un role valide.');
     if (!reactionRolesData[messageId]) return message.reply(`Message introuvable avec l'ID \`${messageId}\`.`);
     const rrEntry = reactionRolesData[messageId];
@@ -1231,8 +1025,7 @@ const commands = {
       const targetChannel = await client.channels.fetch(rrEntry.channelId);
       const targetMessage = await targetChannel.messages.fetch(messageId);
       await targetMessage.react(emoji);
-      rrEntry.roles[emoji] = role.id;
-      saveReactionRoles();
+      rrEntry.roles[emoji] = role.id; saveReactionRoles();
       if (!rrEntry.existingMessage) await updateRREmbed(targetMessage, rrEntry);
       await message.reply(`${emoji} -> <@&${role.id}> ajoute !`);
     } catch (err) { await message.reply(`Erreur : ${err.message}`); }
@@ -1250,8 +1043,7 @@ const commands = {
       const targetMessage = await targetChannel.messages.fetch(messageId);
       const reaction = targetMessage.reactions.cache.find(r => r.emoji.name === emoji);
       if (reaction) await reaction.remove();
-      delete reactionRolesData[messageId].roles[emoji];
-      saveReactionRoles();
+      delete reactionRolesData[messageId].roles[emoji]; saveReactionRoles();
       if (!reactionRolesData[messageId].existingMessage) await updateRREmbed(targetMessage, reactionRolesData[messageId]);
       await message.reply(`Emoji ${emoji} retire.`);
     } catch (err) { await message.reply(`Erreur : ${err.message}`); }
@@ -1280,23 +1072,15 @@ const commands = {
       const targetMessage = await targetChannel.messages.fetch(messageId);
       if (rrEntry.existingMessage) {
         for (const emoji of Object.keys(rrEntry.roles)) {
-          try {
-            const reaction = targetMessage.reactions.cache.find(r => r.emoji.name === emoji);
-            if (reaction) await reaction.users.remove(client.user.id);
-          } catch {}
+          try { const reaction = targetMessage.reactions.cache.find(r => r.emoji.name === emoji); if (reaction) await reaction.users.remove(client.user.id); } catch {}
         }
-      } else {
-        await targetMessage.delete();
-      }
+      } else { await targetMessage.delete(); }
     } catch { console.warn('[RR-DELETE] Message introuvable ou deja supprime.'); }
-    delete reactionRolesData[messageId];
-    saveReactionRoles();
-    await message.reply(rrEntry.existingMessage
-      ? `Config RR retiree du message \`${messageId}\` (message original conserve).`
-      : `Message RR \`${messageId}\` supprime.`);
+    delete reactionRolesData[messageId]; saveReactionRoles();
+    await message.reply(rrEntry.existingMessage ? `Config RR retiree du message \`${messageId}\` (message original conserve).` : `Message RR \`${messageId}\` supprime.`);
   },
 
-  // ETUDES / PUBMED
+  // ── ETUDES / PUBMED ──────────────────────────────────────────
   '!pubmed': async (message) => {
     const fields = [{ name: 'Titre', value: studyData.title || 'Non defini', inline: false }];
     if (studyData.url)   fields.push({ name: 'Lien',        value: studyData.url,           inline: false });
@@ -1314,67 +1098,54 @@ const commands = {
     await message.reply(`Etude mise a jour : **${studyData.title}**`);
   },
 
-  // COPE
+  // ── COPE ─────────────────────────────────────────────────────
   '!cope': async (message) => {
     const copeList        = copesData.cope.length        > 0 ? copesData.cope.map((c, i)        => `${i + 1}. ${c}`).join('\n') : '*Aucun complement.*';
     const interestingList = copesData.interesting.length > 0 ? copesData.interesting.map((c, i) => `${i + 1}. ${c}`).join('\n') : '*Aucun complement.*';
     await message.reply({ embeds: [embed('#FF6B6B').setTitle('Liste des complements').addFields(
-      { name: 'COPE (Inutiles)',   value: copeList.slice(0, 1024),        inline: false },
-      { name: 'Interessants',       value: interestingList.slice(0, 1024), inline: false },
+      { name: 'COPE (Inutiles)', value: copeList.slice(0, 1024),        inline: false },
+      { name: 'Interessants',    value: interestingList.slice(0, 1024), inline: false },
     ).setFooter({ text: `${copesData.cope.length} cope(s) | ${copesData.interesting.length} interessant(s)` })] });
   },
 
-  '!add-cope': async (message, args) => {
+  '!add-cope':        async (message, args) => {
     if (!isAdmin(message.author.id)) return message.reply('Permission refusee.');
-    const name = args.join(' ').trim();
-    if (!name) return message.reply('Format : `!add-cope <nom>`');
+    const name = args.join(' ').trim(); if (!name) return message.reply('Format : `!add-cope <nom>`');
     if (copesData.cope.includes(name)) return message.reply('Deja dans la liste Cope.');
-    copesData.cope.push(name); saveJSON(FILES.copes, copesData);
-    await message.reply(`**${name}** ajoute a la liste Cope.`);
+    copesData.cope.push(name); saveJSON(FILES.copes, copesData); await message.reply(`**${name}** ajoute a la liste Cope.`);
   },
-
   '!add-interesting': async (message, args) => {
     if (!isAdmin(message.author.id)) return message.reply('Permission refusee.');
-    const name = args.join(' ').trim();
-    if (!name) return message.reply('Format : `!add-interesting <nom>`');
+    const name = args.join(' ').trim(); if (!name) return message.reply('Format : `!add-interesting <nom>`');
     if (copesData.interesting.includes(name)) return message.reply('Deja dans la liste Interessants.');
-    copesData.interesting.push(name); saveJSON(FILES.copes, copesData);
-    await message.reply(`**${name}** ajoute a la liste Interessants.`);
+    copesData.interesting.push(name); saveJSON(FILES.copes, copesData); await message.reply(`**${name}** ajoute a la liste Interessants.`);
   },
-
-  '!remove-cope': async (message, args) => {
+  '!remove-cope':     async (message, args) => {
     if (!isAdmin(message.author.id)) return message.reply('Permission refusee.');
-    const name = args.join(' ').trim();
-    const idx  = copesData.cope.indexOf(name);
+    const name = args.join(' ').trim(); const idx = copesData.cope.indexOf(name);
     if (idx === -1) return message.reply(`**${name}** introuvable dans Cope.`);
-    copesData.cope.splice(idx, 1); saveJSON(FILES.copes, copesData);
-    await message.reply(`**${name}** retire de la liste Cope.`);
+    copesData.cope.splice(idx, 1); saveJSON(FILES.copes, copesData); await message.reply(`**${name}** retire de la liste Cope.`);
   },
-
   '!remove-interesting': async (message, args) => {
     if (!isAdmin(message.author.id)) return message.reply('Permission refusee.');
-    const name = args.join(' ').trim();
-    const idx  = copesData.interesting.indexOf(name);
+    const name = args.join(' ').trim(); const idx = copesData.interesting.indexOf(name);
     if (idx === -1) return message.reply(`**${name}** introuvable dans Interessants.`);
-    copesData.interesting.splice(idx, 1); saveJSON(FILES.copes, copesData);
-    await message.reply(`**${name}** retire de la liste Interessants.`);
+    copesData.interesting.splice(idx, 1); saveJSON(FILES.copes, copesData); await message.reply(`**${name}** retire de la liste Interessants.`);
   },
 
-  // REGLES
+  // ── REGLES ───────────────────────────────────────────────────
   '!regles': async (message) => {
     const rulesList = Object.entries(rulesData).sort(([a], [b]) => Number(a) - Number(b)).map(([n, text]) => `**${n}.** ${text}`).join('\n');
     await message.reply({ embeds: [embed('#FAD961').setTitle('Regles du serveur').setDescription(rulesList || '*Aucune regle definie.*')] });
   },
-
   '!set-regle': async (message, args) => {
     if (!isAdmin(message.author.id)) return message.reply('Permission refusee.');
     const parts = args.join(' ').split('|').map(s => s.trim());
     if (parts.length < 2 || isNaN(Number(parts[0]))) return message.reply('Format : `!set-regle <numero> | <texte>`');
-    rulesData[parts[0]] = parts[1]; saveJSON(FILES.rules, rulesData);
-    await message.reply(`Regle **${parts[0]}** mise a jour.`);
+    rulesData[parts[0]] = parts[1]; saveJSON(FILES.rules, rulesData); await message.reply(`Regle **${parts[0]}** mise a jour.`);
   },
 
-  // MODERATION
+  // ── MODERATION ───────────────────────────────────────────────
   '!source': async (message) => {
     if (isAdmin(message.author.id)) return;
     try {
@@ -1382,7 +1153,6 @@ const commands = {
       await message.reply({ embeds: [embed('#FFA500').setTitle('Mute automatique').setDescription(`<@${message.author.id}> a ete mute pendant 10 minutes.\n\n**CF : regle 1.**`)] });
     } catch (err) { await message.reply(`Impossible de muter : ${err.message}`); }
   },
-
   '!mk677': async (message) => {
     if (isAdmin(message.author.id)) return;
     try {
@@ -1390,7 +1160,6 @@ const commands = {
       await message.reply({ embeds: [embed('#FF4444').setTitle('Mute automatique (mk677)').setDescription(`<@${message.author.id}> a ete mute pendant 10 minutes.\n\n**CF : regle 1.**`)] });
     } catch (err) { await message.reply(`Impossible de muter : ${err.message}`); }
   },
-
   '!ban': async (message, args) => {
     if (!message.member.permissions.has(PermissionsBitField.Flags.BanMembers)) return message.reply('Tu n\'as pas la permission de bannir des membres.');
     const target = message.mentions.members.first();
@@ -1412,37 +1181,27 @@ const commands = {
     } catch (err) { await message.reply(`Erreur lors du ban : ${err.message}`); }
   },
 
-  // FLUIDE
+  // ── FLUIDE ───────────────────────────────────────────────────
   '!fluide': async (message) => {
     if (!isAdmin(message.author.id)) return message.reply('Permission refusee.');
     const target = message.mentions.members.first();
     if (!target) return message.reply('Mentionne un utilisateur : `!fluide @user`');
-    const motifs = [
-      'comportement inexplicable detecte', 'neurones dysfonctionnels confirmes',
-      'coherence logique introuvable', 'ratio subi sans broncher',
-      'a defendu un cope en public', 'a demande une source',
-      'a mentionne le MK-677 volontairement', 'analyse biometrique : QI fluide detecte',
-      'a pris du fenugrec en pensant que ca servait a quelque chose',
-      'a confondu creatine et steroides pour la 3eme fois',
-    ];
+    const motifs = ['comportement inexplicable detecte', 'neurones dysfonctionnels confirmes', 'coherence logique introuvable', 'ratio subi sans broncher', 'a defendu un cope en public', 'a demande une source', 'a mentionne le MK-677 volontairement', 'analyse biometrique : QI fluide detecte', 'a pris du fenugrec en pensant que ca servait a quelque chose', 'a confondu creatine et steroides pour la 3eme fois'];
     const motif = motifs[Math.floor(Math.random() * motifs.length)];
-    await message.reply({ embeds: [embed('#9B59B6')
-      .setTitle('Systeme Fluide Active')
+    await message.reply({ embeds: [embed('#9B59B6').setTitle('Systeme Fluide Active')
       .setDescription(`<@${target.id}> est officiellement passe sous **systeme fluide** pour les prochaines **24h**.\n\nConformement a la regle 3, les insultes et ratios a son encontre sont desormais **autorises et encourages**.`)
       .addFields(
-        { name: 'Motif detecte', value: motif,                                 inline: false },
-        { name: 'Statut',        value: 'FLUIDE -- Protection sociale retiree', inline: true  },
-        { name: 'Duree estimee', value: '24h (ou jusqu\'a guerison)',          inline: true  },
-      )
-      .setFooter({ text: `Decision prise par ${message.author.displayName} -- Systeme Fluide` })
-    ] });
+        { name: 'Motif detecte', value: motif,                                  inline: false },
+        { name: 'Statut',        value: 'FLUIDE -- Protection sociale retiree',  inline: true  },
+        { name: 'Duree estimee', value: '24h (ou jusqu\'a guerison)',           inline: true  },
+      ).setFooter({ text: `Decision prise par ${message.author.displayName} -- Systeme Fluide` })] });
   },
 
-  // IQTEST
+  // ── IQTEST ───────────────────────────────────────────────────
   '!iqtest': async (message) => {
-    const target  = message.mentions.members.first() || message.member;
-    const base    = isAdmin(message.author.id) ? 110 : 90;
-    const iq      = Math.floor(base + (Math.random() * 80) - 40);
+    const target = message.mentions.members.first() || message.member;
+    const base = isAdmin(message.author.id) ? 110 : 90;
+    const iq   = Math.floor(base + (Math.random() * 80) - 40);
     let verdict, color;
     if      (iq >= 145) { verdict = 'Genie absolu. Probablement un mensonge.';                  color = '#7289DA'; }
     else if (iq >= 120) { verdict = 'Intelligent. Tu poses quand meme des questions idiotes.';   color = '#00B5D8'; }
@@ -1457,22 +1216,11 @@ const commands = {
     ).setFooter({ text: 'Certifie par l\'Institut International du Cerveau Fluide' })] });
   },
 
-  // COPE DU JOUR
+  // ── COPE DU JOUR ─────────────────────────────────────────────
   '!cope-du-jour': async (message) => {
     if (copesData.cope.length === 0) return message.reply('Aucun cope dans la liste. Utilise `!add-cope` pour en ajouter.');
     const random = copesData.cope[Math.floor(Math.random() * copesData.cope.length)];
-    const refutations = [
-      'Aucune etude peer-reviewed ne supporte cette affirmation.',
-      'Des scientifiques ont tente de reproduire ces resultats. Ils pleurent encore.',
-      'Efficacite prouvee sur 3 personnes dont 2 qui voulaient recuperer leur argent.',
-      'Le seul effet documente : appauvrissement du portefeuille.',
-      'Meta-analyse de 0 etudes conclut a l\'absence totale d\'effet.',
-      'Recommande par des influenceurs fitness. C\'est tout ce qu\'on dira.',
-      'La FDA, l\'EFSA et ton medecin generaliste ont ri en choeur.',
-      'Fonctionne tres bien sur des souris. Toi, tu n\'es pas une souris.',
-      'Approuve par des gens qui vendent aussi des colliers magnetiques.',
-      'L\'etude citee : un blog wordpress de 2011 sans sources.',
-    ];
+    const refutations = ['Aucune etude peer-reviewed ne supporte cette affirmation.', 'Des scientifiques ont tente de reproduire ces resultats. Ils pleurent encore.', 'Efficacite prouvee sur 3 personnes dont 2 qui voulaient recuperer leur argent.', 'Le seul effet documente : appauvrissement du portefeuille.', 'Meta-analyse de 0 etudes conclut a l\'absence totale d\'effet.', 'Recommande par des influenceurs fitness. C\'est tout ce qu\'on dira.', 'La FDA, l\'EFSA et ton medecin generaliste ont ri en choeur.', 'Fonctionne tres bien sur des souris. Toi, tu n\'es pas une souris.', 'Approuve par des gens qui vendent aussi des colliers magnetiques.', 'L\'etude citee : un blog wordpress de 2011 sans sources.'];
     const refutation = refutations[Math.floor(Math.random() * refutations.length)];
     await message.reply({ embeds: [embed('#FF6B6B').setTitle('Cope du jour').addFields(
       { name: 'Produit du jour',   value: `**${random}**`, inline: false },
@@ -1480,146 +1228,426 @@ const commands = {
     ).setFooter({ text: 'Base sur des donnees solides. Tres solides. Betonnees.' })] });
   },
 
-  // MOMMY ASMR
+  // ── MOMMY ASMR ───────────────────────────────────────────────
   '!mommy-asmr': async (message) => {
     if (!CONFIG.MOMMY_ASMR_USER_IDS.includes(message.author.id)) return message.reply('Permission refusee.');
     try {
       await message.channel.send({ content: 'Mommy ASMR en approche...', files: [CONFIG.MOMMY_ASMR_FILE_URL] });
     } catch (err) { await message.reply(`Echec envoi ASMR : ${err.message}`); }
   },
+
+  // ============================================================
+  //  RATING GYMGIRL — SYSTÈME ELO
+  // ============================================================
+
+  '!rate': async (message) => {
+    if (!hasRatingRole(message.member)) {
+      return message.reply('Tu n\'as pas le rôle requis pour utiliser le rating. Demande à un admin avec `!give-rating @toi`.');
+    }
+
+    const db = await getGymgirls();
+    const girls = db.girls || [];
+
+    if (girls.length < 2) {
+      return message.reply('Pas assez de gymgirls dans la base (minimum 2). Un admin peut en ajouter avec `!rate-add <nom> | <url>`.');
+    }
+
+    // Un seul vote actif par salon
+    if (db.activeVotes && db.activeVotes[message.channel.id]) {
+      return message.reply('Un vote est déjà en cours dans ce salon. Attends la fin ou que le timer expire (5 min).');
+    }
+
+    // Tirage de 2 gymgirls différentes (pondéré par l'inverse de leur ELO pour équilibrer les matchs)
+    const shuffled = [...girls].sort(() => Math.random() - 0.5);
+    const girlA    = shuffled[0];
+    const girlB    = shuffled[1];
+    const voteId   = Date.now().toString(36);
+
+    // Boutons
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`rate_${voteId}_A`)
+        .setLabel('⬅️  Elle')
+        .setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId(`rate_${voteId}_skip`)
+        .setLabel('⏭️  Skip')
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId(`rate_${voteId}_B`)
+        .setLabel('Elle  ➡️')
+        .setStyle(ButtonStyle.Danger),
+    );
+
+    // Header embed
+    const headerEmbed = new EmbedBuilder()
+      .setColor('#FF6B9D')
+      .setTitle('⚡ Qui a le meilleur physique ?')
+      .setDescription(
+        `**${girlA.name}** \`ELO ${girlA.elo}\`  vs  **${girlB.name}** \`ELO ${girlB.elo}\`\n\n` +
+        `Clique sur un bouton pour voter — le résultat met à jour le classement ELO en temps réel.\n` +
+        `Plusieurs membres peuvent voter sur le même duel.`
+      )
+      .setFooter({ text: `Vote lancé par ${message.author.displayName} · Expire dans 5 min` })
+      .setTimestamp();
+
+    await message.channel.send({ embeds: [headerEmbed] });
+
+    // Envoyer les deux images
+    await message.channel.send({ content: `⬅️  **${girlA.name}**`, files: [girlA.imageUrl] })
+      .catch(() => message.channel.send({ content: `⬅️  **${girlA.name}** — ${girlA.imageUrl}` }));
+
+    await message.channel.send({ content: `➡️  **${girlB.name}**`, files: [girlB.imageUrl] })
+      .catch(() => message.channel.send({ content: `➡️  **${girlB.name}** — ${girlB.imageUrl}` }));
+
+    const voteMsg = await message.channel.send({ components: [row] });
+
+    // Sauvegarder le vote actif dans JSONBin
+    if (!db.activeVotes) db.activeVotes = {};
+    db.activeVotes[message.channel.id] = {
+      voteId,
+      channelId:   message.channel.id,
+      messageId:   voteMsg.id,
+      girlAId:     girlA.id,
+      girlBId:     girlB.id,
+      votedUsers:  [],
+      createdAt:   Date.now(),
+    };
+    await saveGymgirls(db);
+
+    // Auto-expire après 5 minutes
+    setTimeout(async () => {
+      try {
+        const fresh = await getGymgirls();
+        if (!fresh.activeVotes?.[message.channel.id] || fresh.activeVotes[message.channel.id].voteId !== voteId) return;
+        delete fresh.activeVotes[message.channel.id];
+        await saveGymgirls(fresh);
+
+        const msg = await message.channel.messages.fetch(voteMsg.id).catch(() => null);
+        if (msg) {
+          const expiredRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('rate_expired_A').setLabel('⬅️ Elle').setStyle(ButtonStyle.Secondary).setDisabled(true),
+            new ButtonBuilder().setCustomId('rate_expired_skip').setLabel('⏭️ Skip').setStyle(ButtonStyle.Secondary).setDisabled(true),
+            new ButtonBuilder().setCustomId('rate_expired_B').setLabel('Elle ➡️').setStyle(ButtonStyle.Secondary).setDisabled(true),
+          );
+          await msg.edit({ components: [expiredRow] }).catch(() => {});
+        }
+
+        await message.channel.send({
+          embeds: [new EmbedBuilder().setColor('#888888').setTitle('⏱️ Vote expiré')
+            .setDescription(`Le duel **${girlA.name}** vs **${girlB.name}** a expiré sans vainqueur.`)],
+        }).catch(() => {});
+      } catch (err) { console.error('[RATE] Erreur expiration :', err.message); }
+    }, 5 * 60 * 1000);
+  },
+
+  '!rate-top': async (message) => {
+    if (!hasRatingRole(message.member)) return message.reply('Tu n\'as pas le rôle requis.');
+    const db     = await getGymgirls();
+    const girls  = db.girls || [];
+    if (girls.length === 0) return message.reply('Aucune gymgirl dans la base de données.');
+
+    const sorted  = [...girls].sort((a, b) => b.elo - a.elo);
+    const medals  = ['🥇', '🥈', '🥉'];
+    const fields  = sorted.slice(0, 10).map((g, i) => {
+      const total   = g.wins + g.losses;
+      const winrate = total > 0 ? Math.round(g.wins / total * 100) : 0;
+      return {
+        name:   `${medals[i] || `#${i + 1}`}  ${g.name}`,
+        value:  `ELO **${g.elo}** · ${g.wins}V / ${g.losses}D · Win rate ${winrate}%`,
+        inline: false,
+      };
+    });
+
+    await message.reply({
+      embeds: [new EmbedBuilder()
+        .setColor('#FFD700')
+        .setTitle('🏆 Classement Gymgirl — Top 10')
+        .addFields(fields)
+        .setFooter({ text: `${girls.length} athlète(s) dans la base · Système ELO (K=32)` })
+        .setTimestamp()],
+    });
+  },
+
+  '!rate-list': async (message) => {
+    if (!isAdmin(message.author.id)) return message.reply('Permission refusée.');
+    const db    = await getGymgirls();
+    const girls = db.girls || [];
+    if (girls.length === 0) return message.reply('Aucune gymgirl dans la base.');
+    const sorted = [...girls].sort((a, b) => b.elo - a.elo);
+    const list   = sorted.map((g, i) => `\`${String(i + 1).padStart(2, '0')}\` **${g.name}** · ELO ${g.elo} · ${g.wins}V/${g.losses}D · ID \`${g.id}\``).join('\n');
+    await message.reply({
+      embeds: [new EmbedBuilder()
+        .setColor('#7289DA')
+        .setTitle(`📋 Liste complète — ${girls.length} gymgirl(s)`)
+        .setDescription(list.slice(0, 4096))
+        .setFooter({ text: 'Base de données : JSONBin.io · !rate-add / !rate-remove pour gérer' })],
+    });
+  },
+
+  '!rate-add': async (message, args) => {
+    if (!isAdmin(message.author.id)) return message.reply('Permission refusée.');
+    const parts = args.join(' ').split('|').map(s => s.trim());
+    if (parts.length < 2) return message.reply('Format : `!rate-add <nom> | <url_image>`');
+    const [name, imageUrl] = parts;
+    if (!imageUrl.startsWith('http')) return message.reply('L\'URL doit commencer par `http`.');
+
+    const db    = await getGymgirls();
+    const girls = db.girls || [];
+
+    if (girls.find(g => g.name.toLowerCase() === name.toLowerCase())) {
+      return message.reply(`**${name}** est déjà dans la base.`);
+    }
+
+    const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    girls.push({ id, name, imageUrl, elo: 1000, wins: 0, losses: 0 });
+    db.girls = girls;
+    await saveGymgirls(db);
+
+    await message.reply({
+      embeds: [new EmbedBuilder()
+        .setColor('#00FF66')
+        .setTitle('Gymgirl ajoutée ✅')
+        .addFields(
+          { name: 'Nom',      value: name,          inline: true },
+          { name: 'ELO init', value: '1000',         inline: true },
+          { name: 'ID',       value: `\`${id}\``,    inline: true },
+        )
+        .setThumbnail(imageUrl)
+        .setFooter({ text: 'Sauvegardé sur JSONBin.io' })],
+    });
+  },
+
+  '!rate-remove': async (message, args) => {
+    if (!isAdmin(message.author.id)) return message.reply('Permission refusée.');
+    const name = args.join(' ').trim();
+    if (!name) return message.reply('Format : `!rate-remove <nom>`');
+
+    const db    = await getGymgirls();
+    const girls = db.girls || [];
+    const idx   = girls.findIndex(g => g.name.toLowerCase() === name.toLowerCase());
+    if (idx === -1) return message.reply(`**${name}** introuvable dans la base.`);
+
+    const [removed] = girls.splice(idx, 1);
+    db.girls = girls;
+    await saveGymgirls(db);
+    await message.reply(`**${removed.name}** retirée. ELO final : **${removed.elo}** (${removed.wins}V / ${removed.losses}D).`);
+  },
+
+  '!rate-reset': async (message, args) => {
+    if (!isAdmin(message.author.id)) return message.reply('Permission refusée.');
+    const name = args.join(' ').trim();
+    if (!name) return message.reply('Format : `!rate-reset <nom>`');
+
+    const db    = await getGymgirls();
+    const girl  = (db.girls || []).find(g => g.name.toLowerCase() === name.toLowerCase());
+    if (!girl) return message.reply(`**${name}** introuvable.`);
+
+    girl.elo = 1000; girl.wins = 0; girl.losses = 0;
+    await saveGymgirls(db);
+    await message.reply(`ELO de **${girl.name}** réinitialisé à 1000.`);
+  },
+
+  // ── GIVE-RATING ──────────────────────────────────────────────
+  '!give-rating': async (message) => {
+    if (!isAdmin(message.author.id)) return message.reply('Permission refusée.');
+    const target = message.mentions.members.first();
+    if (!target) return message.reply('Mentionne un utilisateur : `!give-rating @user`');
+
+    const role = message.guild.roles.cache.get(CONFIG.RATING_ROLE_ID);
+    if (!role) return message.reply(`Rôle introuvable (ID : \`${CONFIG.RATING_ROLE_ID}\`). Vérifie la config.`);
+
+    if (target.roles.cache.has(CONFIG.RATING_ROLE_ID)) {
+      // Retirer le rôle si déjà présent (toggle)
+      await target.roles.remove(role, `Rating role retiré par ${message.author.tag}`);
+      return message.reply({
+        embeds: [new EmbedBuilder()
+          .setColor('#FF4444')
+          .setTitle('Rôle Rating retiré')
+          .setDescription(`<@${target.id}> n'a plus accès au système de rating.`)
+          .addFields({ name: 'Par', value: `<@${message.author.id}>`, inline: true })],
+      });
+    }
+
+    await target.roles.add(role, `Rating role donné par ${message.author.tag}`);
+    await message.reply({
+      embeds: [new EmbedBuilder()
+        .setColor('#00FF66')
+        .setTitle('Rôle Rating attribué ✅')
+        .setDescription(`<@${target.id}> a désormais accès au système de rating gymgirl.`)
+        .addFields(
+          { name: 'Rôle',  value: `<@&${CONFIG.RATING_ROLE_ID}>`,  inline: true },
+          { name: 'Par',   value: `<@${message.author.id}>`,        inline: true },
+        )
+        .setFooter({ text: 'Il peut maintenant utiliser !rate et !rate-top' })],
+    });
+  },
 };
 
 // ============================================================
-//  TOURNOI -- LOGIQUE D'AVANCEMENT
+//  TOURNOI — LOGIQUE D'AVANCEMENT
 // ============================================================
 
 async function advanceTournament(tournamentId, channel) {
   const t = tournamentsData[tournamentId];
   if (!t || t.status !== 'active') return;
-
   const pairs = t.currentPairs;
 
   while (t.currentMatchIndex < pairs.length) {
     const [p1, p2] = pairs[t.currentMatchIndex];
-
     if (p2 === null) {
-      console.log(`[TOURNOI] Bye pour ${p1.username} (match ${t.currentMatchIndex + 1})`);
       t.roundWinners.push(p1);
       t.history.push({ round: t.currentRound, match: t.currentMatchIndex + 1, winner: p1, loser: null, bye: true });
-      t.currentMatchIndex++;
-      saveTournaments();
-      continue;
+      t.currentMatchIndex++; saveTournaments(); continue;
     }
-
     const voteMsgId = await sendVersus(channel, tournamentId, t.currentMatchIndex, p1, p2);
-    t.currentVoteMessageId = voteMsgId;
-    saveTournaments();
-    return;
+    t.currentVoteMessageId = voteMsgId; saveTournaments(); return;
   }
 
   const winners = t.roundWinners;
 
   if (winners.length === 1) {
-    t.status = 'finished';
-    t.winner = winners[0];
-    saveTournaments();
-
-    const winnerEmbed = embed('#FFD700')
-      .setTitle('VICTOIRE FINALE !')
-      .setDescription(
-        `**${winners[0].username}** remporte le tournoi physique !\n\n` +
-        `Felicitations a <@${winners[0].userId}> pour avoir battu tous les adversaires !`
-      )
+    t.status = 'finished'; t.winner = winners[0]; saveTournaments();
+    await channel.send({ content: '@everyone', embeds: [embed('#FFD700').setTitle('VICTOIRE FINALE !')
+      .setDescription(`**${winners[0].username}** remporte le tournoi physique !\n\nFelicitations a <@${winners[0].userId}> !`)
       .addFields(
-        { name: 'Gagnant',        value: `<@${winners[0].userId}>`,                            inline: true },
-        { name: 'Participants',    value: `${t.participants.length}`,                           inline: true },
-        { name: 'Rounds joues',   value: `${t.currentRound}`,                                  inline: true },
-      )
-      .setFooter({ text: `Tournoi #${tournamentId} -- Termine` });
-
-    await channel.send({ content: '@everyone', embeds: [winnerEmbed] });
+        { name: 'Gagnant',      value: `<@${winners[0].userId}>`, inline: true },
+        { name: 'Participants', value: `${t.participants.length}`, inline: true },
+        { name: 'Rounds',       value: `${t.currentRound}`,       inline: true },
+      ).setFooter({ text: `Tournoi #${tournamentId} -- Termine` })] });
     return;
   }
 
   t.currentRound++;
   t.allRoundWinners.push(...t.roundWinners);
-  t.currentPairs   = buildRound(winners);
+  t.currentPairs      = buildRound(winners);
   t.currentMatchIndex = 0;
-  t.roundWinners   = [];
+  t.roundWinners      = [];
   saveTournaments();
 
-  const roundEmbed = embed('#FFD700')
-    .setTitle(`Round ${t.currentRound} -- Debut !`)
+  await channel.send({ embeds: [embed('#FFD700').setTitle(`Round ${t.currentRound} -- Debut !`)
     .setDescription(`**${winners.length} joueurs** s'affrontent pour le round ${t.currentRound} !`)
-    .addFields(
-      { name: 'Qualifies', value: winners.map(w => `<@${w.userId}>`).join(', ').slice(0, 1024), inline: false },
-    );
-
-  await channel.send({ embeds: [roundEmbed] });
+    .addFields({ name: 'Qualifies', value: winners.map(w => `<@${w.userId}>`).join(', ').slice(0, 1024), inline: false })] });
   await advanceTournament(tournamentId, channel);
 }
 
 // ============================================================
-//  HANDLER -- Boutons de tournoi
+//  HANDLER — Interactions (boutons)
 // ============================================================
 
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isButton()) return;
-
   const customId = interaction.customId;
+
+  // ── Boutons de RATING ──────────────────────────────────────
+  if (customId.startsWith('rate_')) {
+    const parts  = customId.split('_');
+    const voteId = parts[1];
+    const choice = parts[2]; // A | B | skip | expired
+
+    // Bouton expiré
+    if (voteId === 'expired') {
+      return interaction.reply({ content: 'Ce vote a expiré.', ephemeral: true });
+    }
+
+    // Vérif rôle
+    const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+    if (!member || !hasRatingRole(member)) {
+      return interaction.reply({ content: 'Tu n\'as pas le rôle requis pour voter.', ephemeral: true });
+    }
+
+    const db     = await getGymgirls();
+    const active = db.activeVotes?.[interaction.channel.id];
+
+    if (!active || active.voteId !== voteId) {
+      return interaction.reply({ content: 'Ce vote n\'est plus actif ou a expiré.', ephemeral: true });
+    }
+    if (active.votedUsers.includes(interaction.user.id)) {
+      return interaction.reply({ content: 'Tu as déjà voté sur ce duel.', ephemeral: true });
+    }
+
+    // Skip
+    if (choice === 'skip') {
+      active.votedUsers.push(interaction.user.id);
+      await saveGymgirls(db);
+      return interaction.reply({ content: '⏭️ Skip enregistré.', ephemeral: true });
+    }
+
+    // Vote A ou B
+    const girlA   = (db.girls || []).find(g => g.id === active.girlAId);
+    const girlB   = (db.girls || []).find(g => g.id === active.girlBId);
+    if (!girlA || !girlB) return interaction.reply({ content: 'Erreur : données corrompues.', ephemeral: true });
+
+    const winner = choice === 'A' ? girlA : girlB;
+    const loser  = choice === 'A' ? girlB : girlA;
+
+    // Calcul ELO (K=32)
+    const K         = 32;
+    const expectedW = 1 / (1 + Math.pow(10, (loser.elo - winner.elo) / 400));
+    const gainW     = Math.round(K * (1 - expectedW));
+    const gainL     = Math.round(K * (0 - (1 - expectedW)));
+
+    const prevWinnerElo = winner.elo;
+    const prevLoserElo  = loser.elo;
+
+    winner.elo  = Math.max(100, winner.elo + gainW);
+    loser.elo   = Math.max(100, loser.elo + gainL);
+    winner.wins++;
+    loser.losses++;
+
+    active.votedUsers.push(interaction.user.id);
+    await saveGymgirls(db);
+
+    await interaction.reply({
+      embeds: [new EmbedBuilder()
+        .setColor('#00FF66')
+        .setTitle('Vote enregistré ✅')
+        .setDescription(
+          `Tu as voté pour **${winner.name}**.\n\n` +
+          `**${winner.name}** \`${prevWinnerElo}\` → \`${winner.elo}\` **(+${gainW})**\n` +
+          `**${loser.name}** \`${prevLoserElo}\` → \`${loser.elo}\` **(${gainL})**`
+        )
+        .setFooter({ text: `K=32 · Votes sur ce duel : ${active.votedUsers.length}` })],
+      ephemeral: true,
+    });
+
+    return;
+  }
+
+  // ── Boutons de TOURNOI ─────────────────────────────────────
   if (!customId.startsWith('tournament_')) return;
 
   if (!isAdmin(interaction.user.id)) {
     return interaction.reply({ content: 'Seul Crous peut voter.', ephemeral: true });
   }
 
-  const parts = customId.split('_');
+  const parts        = customId.split('_');
   const choice       = parts[parts.length - 1];
   const matchIndex   = parseInt(parts[parts.length - 2]);
   const tournamentId = parts.slice(1, parts.length - 2).join('_');
 
   const t = tournamentsData[tournamentId];
-  if (!t || t.status !== 'active') {
-    return interaction.reply({ content: 'Ce tournoi n\'est plus actif.', ephemeral: true });
-  }
-
-  if (matchIndex !== t.currentMatchIndex) {
-    return interaction.reply({ content: 'Ce vote est obsolete.', ephemeral: true });
-  }
+  if (!t || t.status !== 'active') return interaction.reply({ content: 'Ce tournoi n\'est plus actif.', ephemeral: true });
+  if (matchIndex !== t.currentMatchIndex) return interaction.reply({ content: 'Ce vote est obsolete.', ephemeral: true });
 
   const [p1, p2] = t.currentPairs[matchIndex];
-  const winner = choice === 'A' ? p1 : p2;
-  const loser  = choice === 'A' ? p2 : p1;
+  const winner   = choice === 'A' ? p1 : p2;
+  const loser    = choice === 'A' ? p2 : p1;
 
   t.roundWinners.push(winner);
   t.history.push({ round: t.currentRound, match: matchIndex + 1, winner, loser, bye: false });
-  t.currentMatchIndex++;
-  saveTournaments();
+  t.currentMatchIndex++; saveTournaments();
 
   const disabledRow = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId('done_A')
-      .setLabel(choice === 'A' ? 'Joueur A (Gagnant)' : 'Joueur A')
-      .setStyle(choice === 'A' ? ButtonStyle.Success : ButtonStyle.Secondary)
-      .setDisabled(true),
-    new ButtonBuilder()
-      .setCustomId('done_B')
-      .setLabel(choice === 'B' ? 'Joueur B (Gagnant)' : 'Joueur B')
-      .setStyle(choice === 'B' ? ButtonStyle.Success : ButtonStyle.Secondary)
-      .setDisabled(true),
+    new ButtonBuilder().setCustomId('done_A').setLabel(choice === 'A' ? 'Joueur A (Gagnant)' : 'Joueur A').setStyle(choice === 'A' ? ButtonStyle.Success : ButtonStyle.Secondary).setDisabled(true),
+    new ButtonBuilder().setCustomId('done_B').setLabel(choice === 'B' ? 'Joueur B (Gagnant)' : 'Joueur B').setStyle(choice === 'B' ? ButtonStyle.Success : ButtonStyle.Secondary).setDisabled(true),
   );
 
   await interaction.update({ components: [disabledRow] }).catch(() => {});
-
-  await interaction.channel.send({
-    embeds: [embed('#00FF66')
-      .setTitle(`Match ${matchIndex + 1} -- Resultat`)
-      .addFields(
-        { name: 'Gagnant', value: `<@${winner.userId}> (${winner.username})`, inline: true },
-        { name: 'Elimine', value: `<@${loser.userId}> (${loser.username})`,   inline: true },
-      )
-    ],
-  });
+  await interaction.channel.send({ embeds: [embed('#00FF66').setTitle(`Match ${matchIndex + 1} -- Resultat`).addFields(
+    { name: 'Gagnant', value: `<@${winner.userId}> (${winner.username})`, inline: true },
+    { name: 'Elimine', value: `<@${loser.userId}> (${loser.username})`,   inline: true },
+  )] });
 
   await advanceTournament(tournamentId, interaction.channel);
 });
@@ -1663,15 +1691,14 @@ client.on('messageReactionAdd', async (reaction, user) => {
 
   const msgId     = reaction.message.id;
   const emojiName = reaction.emoji.name;
-
   const { MESSAGE_ID, CHANNEL_ID, ROLE_ID, EMOJI } = CONFIG.REACTION_ROLE;
+
   if (msgId === MESSAGE_ID && reaction.message.channel.id === CHANNEL_ID && emojiName === EMOJI) {
     try {
       const member = await reaction.message.guild.members.fetch(user.id);
       const role   = reaction.message.guild.roles.cache.get(ROLE_ID);
       if (!role) return console.error('[REACTION ROLE] Role introuvable :', ROLE_ID);
       await member.roles.add(role);
-      console.log(`[REACTION ROLE] Role "${role.name}" donne a ${user.tag}`);
       try { await user.send('Tu as bien recu l\'acces au serveur ! Bienvenue !'); } catch {}
     } catch (err) { console.error('[REACTION ROLE] Erreur :', err.message); }
     return;
@@ -1696,8 +1723,8 @@ client.on('messageReactionRemove', async (reaction, user) => {
 
   const msgId     = reaction.message.id;
   const emojiName = reaction.emoji.name;
-
   const { MESSAGE_ID, CHANNEL_ID, ROLE_ID, EMOJI } = CONFIG.REACTION_ROLE;
+
   if (msgId === MESSAGE_ID && reaction.message.channel.id === CHANNEL_ID && emojiName === EMOJI) {
     try {
       const member = await reaction.message.guild.members.fetch(user.id);
@@ -1724,28 +1751,22 @@ client.on('messageReactionRemove', async (reaction, user) => {
 //  TIKTOK LIVE CHECKER
 // ============================================================
 
-let liveDetectionStreak = 0;
+let liveDetectionStreak    = 0;
 const LIVE_DETECTION_THRESHOLD = 2;
 
 async function checkTikTokLive() {
   try {
     const headers = {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
       'Accept-Encoding': 'gzip, deflate, br',
-      'Cache-Control': 'no-cache',
-      'Pragma': 'no-cache',
-      'Sec-Fetch-Mode': 'navigate',
+      'Cache-Control':   'no-cache',
+      'Pragma':          'no-cache',
+      'Sec-Fetch-Mode':  'navigate',
     };
-
-    const response = await axios.get(
-      `https://www.tiktok.com/@${CONFIG.TIKTOK_USERNAME}/live`,
-      { headers, timeout: 15000, maxRedirects: 5 }
-    );
-
-    const html = response.data;
-
+    const response = await axios.get(`https://www.tiktok.com/@${CONFIG.TIKTOK_USERNAME}/live`, { headers, timeout: 15000, maxRedirects: 5 });
+    const html     = response.data;
     const patterns = [
       /"statusStr"\s*:\s*"LIVE_STATUS_STREAMING"/.test(html),
       /"isLiveStreaming"\s*:\s*true/.test(html),
@@ -1753,140 +1774,87 @@ async function checkTikTokLive() {
       /roomid[^"]*"[^"]{5,}/.test(html) && !/redirectUrl/.test(html),
       /"liveUrl"/.test(html) && !/"liveUrl"\s*:\s*""/.test(html),
     ];
+    const positiveSignals  = patterns.filter(Boolean).length;
+    const isCurrentlyLive  = positiveSignals >= 2;
 
-    const positiveSignals = patterns.filter(Boolean).length;
-    const isCurrentlyLive = positiveSignals >= 2;
-
-    console.log(`[LIVE CHECK] @${CONFIG.TIKTOK_USERNAME} -- ${positiveSignals}/5 signaux positifs -- Streak: ${liveDetectionStreak}`);
+    console.log(`[LIVE CHECK] @${CONFIG.TIKTOK_USERNAME} -- ${positiveSignals}/5 signaux -- Streak: ${liveDetectionStreak}`);
 
     const channel = client.channels.cache.get(CONFIG.LIVE_CHANNEL_ID);
-    if (!channel) {
-      console.error(`[LIVE] Channel ${CONFIG.LIVE_CHANNEL_ID} introuvable.`);
-      return;
-    }
+    if (!channel) { console.error(`[LIVE] Channel ${CONFIG.LIVE_CHANNEL_ID} introuvable.`); return; }
 
     if (isCurrentlyLive) {
       liveDetectionStreak++;
-
       if (liveDetectionStreak >= LIVE_DETECTION_THRESHOLD && !liveStatus.isLive) {
-        liveStatus.isLive       = true;
-        liveStatus.lastNotified = new Date().toISOString();
-        saveJSON(FILES.liveStatus, liveStatus);
-
-        const liveEmbed = embed('#FF0050')
-          .setTitle('LIVE EN COURS !')
-          .setDescription(
-            `**@${CONFIG.TIKTOK_USERNAME}** est actuellement en **live** sur TikTok !\n\n` +
-            `Clique sur le lien ci-dessous pour rejoindre le live.`
-          )
-          .addFields(
-            { name: 'Lien direct',   value: `https://www.tiktok.com/@${CONFIG.TIKTOK_USERNAME}/live`, inline: false },
-            { name: 'Detecte a',     value: `<t:${Math.floor(Date.now() / 1000)}:T>`,                inline: true  },
-          )
-          .setThumbnail(`https://unavatar.io/tiktok/${CONFIG.TIKTOK_USERNAME}`)
-          .setFooter({ text: `TikTok Live Detector - @${CONFIG.TIKTOK_USERNAME}` });
-
-        await channel.send({
-          content: `@everyone **@${CONFIG.TIKTOK_USERNAME}** est en live sur TikTok !`,
-          embeds: [liveEmbed],
-        });
-
-        console.log(`[LIVE] @${CONFIG.TIKTOK_USERNAME} est en live -- Notification envoyee.`);
+        liveStatus.isLive = true; liveStatus.lastNotified = new Date().toISOString(); saveJSON(FILES.liveStatus, liveStatus);
+        await channel.send({ content: `@everyone **@${CONFIG.TIKTOK_USERNAME}** est en live sur TikTok !`,
+          embeds: [embed('#FF0050').setTitle('LIVE EN COURS !')
+            .setDescription(`**@${CONFIG.TIKTOK_USERNAME}** est actuellement en **live** sur TikTok !\n\nClique sur le lien ci-dessous pour rejoindre le live.`)
+            .addFields(
+              { name: 'Lien direct', value: `https://www.tiktok.com/@${CONFIG.TIKTOK_USERNAME}/live`, inline: false },
+              { name: 'Detecte a',   value: `<t:${Math.floor(Date.now() / 1000)}:T>`,                 inline: true  },
+            ).setThumbnail(`https://unavatar.io/tiktok/${CONFIG.TIKTOK_USERNAME}`)
+            .setFooter({ text: `TikTok Live Detector - @${CONFIG.TIKTOK_USERNAME}` })] });
       }
-
     } else {
-      if (liveDetectionStreak > 0) {
-        console.log(`[LIVE] Streak reinitialise (${liveDetectionStreak} -> 0)`);
-        liveDetectionStreak = 0;
-      }
-
-      if (liveStatus.isLive) {
-        liveStatus.isLive = false;
-        saveJSON(FILES.liveStatus, liveStatus);
-        console.log(`[LIVE] @${CONFIG.TIKTOK_USERNAME} a termine son live.`);
-      }
+      if (liveDetectionStreak > 0) { liveDetectionStreak = 0; }
+      if (liveStatus.isLive) { liveStatus.isLive = false; saveJSON(FILES.liveStatus, liveStatus); }
     }
-
   } catch (err) {
-    if (err.response?.status === 429) {
-      console.warn('[LIVE] Rate limit TikTok -- Pause temporaire.');
-    } else if (err.response?.status === 404) {
-      console.warn(`[LIVE] Page TikTok introuvable pour @${CONFIG.TIKTOK_USERNAME}`);
-    } else {
-      console.error('[LIVE] Erreur verification TikTok:', err.message);
-    }
+    if (err.response?.status === 429) { console.warn('[LIVE] Rate limit TikTok.'); }
+    else if (err.response?.status === 404) { console.warn(`[LIVE] Page TikTok introuvable.`); }
+    else { console.error('[LIVE] Erreur :', err.message); }
   }
 }
 
 // ============================================================
-//  RESTAURATION DES TIMERS AU DEMARRAGE
+//  RESTAURATION DES TIMERS AU DÉMARRAGE
 // ============================================================
 
 async function restoreTimers() {
   const now = Date.now();
 
-  // Jails
   for (const [userId, data] of Object.entries(jailsData)) {
     const remaining    = data.until - now;
     const savedRoleIds = data.savedRoleIds || (data.hadRole ? [CONFIG.JAIL_ACCESS_ROLE_ID] : []);
-
     if (remaining <= 0) {
       try {
         const guild  = await client.guilds.fetch(data.guildId).catch(() => null);
         if (!guild) { delete jailsData[userId]; continue; }
         const member = await guild.members.fetch(userId).catch(() => null);
-        if (member) {
-          await unjailMember(member, savedRoleIds, 'Liberation automatique (rattrapage demarrage)');
-        }
+        if (member) await unjailMember(member, savedRoleIds, 'Liberation automatique (rattrapage demarrage)');
       } catch (err) { console.error('[RESTORE JAIL] Erreur :', err.message); }
       delete jailsData[userId];
     } else {
-      console.log(`[RESTORE] Jail restaure pour ${userId} -- ${Math.ceil(remaining / 1000 / 60)} min restantes (${savedRoleIds.length} roles sauvegardes)`);
       setTimeout(async () => {
         try {
           const guild  = await client.guilds.fetch(data.guildId).catch(() => null);
           if (!guild) { delete jailsData[userId]; saveJails(); return; }
           const member = await guild.members.fetch(userId).catch(() => null);
           const saved  = jailsData[userId];
-          if (member && saved) {
-            await unjailMember(member, saved.savedRoleIds || [], 'Liberation automatique apres jail');
-          }
+          if (member && saved) await unjailMember(member, saved.savedRoleIds || [], 'Liberation automatique apres jail');
           delete jailsData[userId]; saveJails();
-          console.log(`[RESTORE JAIL] ${userId} libere -- roles restaures et overwrites supprimes.`);
           const prisonCh = guild.channels.cache.get(CONFIG.JAIL_PRISON_CHANNEL_ID);
-          if (prisonCh) {
-            await prisonCh.send({
-              embeds: [embed('#00FF66').setTitle('Libere !').setDescription(`<@${userId}> a purge sa peine. Tous ses roles ont ete restaures.`)],
-            }).catch(() => {});
-          }
+          if (prisonCh) await prisonCh.send({ embeds: [embed('#00FF66').setTitle('Libere !').setDescription(`<@${userId}> a purge sa peine.`)] }).catch(() => {});
         } catch (err) { console.error('[RESTORE JAIL] Erreur liberation :', err.message); }
       }, remaining);
     }
   }
   saveJails();
 
-  // NPC
   for (const [userId, data] of Object.entries(npcList)) {
     const remaining = data.until - now;
     if (remaining <= 0) {
       try {
         const guild  = await client.guilds.fetch(data.guildId).catch(() => null);
         const member = guild ? await guild.members.fetch(userId).catch(() => null) : null;
-        if (member) {
-          const restore = data.originalNick === member.user.username ? null : data.originalNick;
-          await member.setNickname(restore, 'Fin NPC (rattrapage demarrage)');
-        }
-      } catch {}
-      delete npcList[userId];
+        if (member) await member.setNickname(data.originalNick === member.user.username ? null : data.originalNick, 'Fin NPC (rattrapage demarrage)');
+      } catch {} delete npcList[userId];
     } else {
       setTimeout(async () => {
         try {
           const guild  = await client.guilds.fetch(data.guildId).catch(() => null);
           const member = guild ? await guild.members.fetch(userId).catch(() => null) : null;
-          if (member) {
-            const restore = data.originalNick === member.user.username ? null : data.originalNick;
-            await member.setNickname(restore, 'Fin du statut NPC');
-          }
+          if (member) await member.setNickname(data.originalNick === member.user.username ? null : data.originalNick, 'Fin du statut NPC');
           delete npcList[userId]; saveNpcList();
         } catch {}
       }, remaining);
@@ -1894,28 +1862,20 @@ async function restoreTimers() {
   }
   saveNpcList();
 
-  // TF
   for (const [userId, data] of Object.entries(tfList)) {
     const remaining = data.until - now;
     if (remaining <= 0) {
       try {
         const guild  = await client.guilds.fetch(data.guildId).catch(() => null);
         const member = guild ? await guild.members.fetch(userId).catch(() => null) : null;
-        if (member) {
-          const restore = data.originalNick === member.user.username ? null : data.originalNick;
-          await member.setNickname(restore, 'Fin TF (rattrapage demarrage)');
-        }
-      } catch {}
-      delete tfList[userId];
+        if (member) await member.setNickname(data.originalNick === member.user.username ? null : data.originalNick, 'Fin TF (rattrapage demarrage)');
+      } catch {} delete tfList[userId];
     } else {
       setTimeout(async () => {
         try {
           const guild  = await client.guilds.fetch(data.guildId).catch(() => null);
           const member = guild ? await guild.members.fetch(userId).catch(() => null) : null;
-          if (member) {
-            const restore = data.originalNick === member.user.username ? null : data.originalNick;
-            await member.setNickname(restore, 'Fin du TF');
-          }
+          if (member) await member.setNickname(data.originalNick === member.user.username ? null : data.originalNick, 'Fin du TF');
           delete tfList[userId]; saveTfList();
         } catch {}
       }, remaining);
@@ -1923,11 +1883,23 @@ async function restoreTimers() {
   }
   saveTfList();
 
+  // Nettoyer les votes actifs expirés dans JSONBin au redémarrage
+  try {
+    const db = await getGymgirls();
+    let changed = false;
+    for (const [channelId, vote] of Object.entries(db.activeVotes || {})) {
+      if (Date.now() - vote.createdAt > 5 * 60 * 1000) {
+        delete db.activeVotes[channelId]; changed = true;
+      }
+    }
+    if (changed) await saveGymgirls(db);
+  } catch (err) { console.error('[RESTORE] Erreur nettoyage votes :', err.message); }
+
   console.log('[RESTORE] Timers restaures avec succes.');
 }
 
 // ============================================================
-//  DEMARRAGE
+//  DÉMARRAGE
 // ============================================================
 
 client.once('ready', async () => {
@@ -1935,6 +1907,8 @@ client.once('ready', async () => {
   console.log(`Admins: ${CONFIG.ADMIN_IDS.join(', ')}`);
   console.log(`Surveillance TikTok: @${CONFIG.TIKTOK_USERNAME}`);
   console.log(`Channel live: ${CONFIG.LIVE_CHANNEL_ID}`);
+  console.log(`Rating role: ${CONFIG.RATING_ROLE_ID}`);
+  console.log(`JSONBin ID: ${_binId || 'sera cree au premier !rate-add'}`);
   console.log(`Multi-RR charges: ${Object.keys(reactionRolesData).length} message(s)`);
   console.log(`Ticket viewer role: ${ticketConfig.viewRoleId  || 'non defini'}`);
   console.log(`Ticket staff role:  ${ticketConfig.staffRoleId || 'non defini'}`);
@@ -1945,7 +1919,6 @@ client.once('ready', async () => {
   console.log(`Jails actifs: ${Object.keys(jailsData).length}`);
 
   await restoreTimers();
-
   checkTikTokLive();
   setInterval(checkTikTokLive, CONFIG.LIVE_CHECK_INTERVAL);
 });
@@ -1953,9 +1926,6 @@ client.once('ready', async () => {
 client.on('error', (err) => console.error('[Discord] Erreur client:', err));
 
 const TOKEN = process.env.DISCORD_TOKEN;
-if (!TOKEN) {
-  console.error('DISCORD_TOKEN manquant ! Definissez la variable d\'environnement.');
-  process.exit(1);
-}
+if (!TOKEN) { console.error('DISCORD_TOKEN manquant !'); process.exit(1); }
 
 client.login(TOKEN);
