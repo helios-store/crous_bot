@@ -28,7 +28,7 @@ const CONFIG = {
   REACTION_ROLE: {
     MESSAGE_ID: '1488290011425149022',
     CHANNEL_ID: '1488289976540991770',
-    ROLE_ID:    '1487674672865611806',
+    ROLE_ID:    '1487674672865611806',  // ancien rôle (sera remplacé par VERIF_PENDING si vérif activée)
     EMOJI:      '\u2705',
   },
 
@@ -38,16 +38,22 @@ const CONFIG = {
   JAIL_PROTECTED_ROLE_IDS: [],
 
   // ── RATING SYSTÈME ──────────────────────────────────────────
-  RATING_ROLE_ID: '1490645216192102421',   // Rôle requis pour voter / voir le rating
+  RATING_ROLE_ID: '1490645216192102421',
 
   // ── JSONBIN CONFIG ───────────────────────────────────────────
-  // 1. Va sur https://jsonbin.io  → crée un compte gratuit
-  // 2. Copie ta Master Key (API Keys → Master Key)
-  // 3. Lance le bot une 1ère fois → il crée automatiquement le bin
-  // OU : crée manuellement un bin avec { "girls": [], "activeVotes": {} }
-  //      et colle son ID dans JSONBIN_BIN_ID
-  JSONBIN_MASTER_KEY: process.env.JSONBIN_MASTER_KEY || '$2a$10$AwINYOxVh1uCEQVco3Da1uJf/hMkwcibwHt7r5CVoUsEbC36wGr8u',   // variable Railway
-  JSONBIN_BIN_ID:     process.env.JSONBIN_BIN_ID     || '',   // variable Railway (optionnel si auto-création)
+  JSONBIN_MASTER_KEY: process.env.JSONBIN_MASTER_KEY || '$2a$10$AwINYOxVh1uCEQVco3Da1uJf/hMkwcibwHt7r5CVoUsEbC36wGr8u',
+  JSONBIN_BIN_ID:     process.env.JSONBIN_BIN_ID     || '',
+
+  // ── VÉRIFICATION MANUELLE ────────────────────────────────────
+  // Configure via !verif-setup ou directement ici :
+  // VERIF_PENDING_ROLE_ID : rôle donné après réaction (accès channel vérif uniquement)
+  // VERIF_APPROVED_ROLE_ID : rôle final après approbation admin (accès complet serveur)
+  // VERIF_CHANNEL_ID : channel où le membre attend sa vérification
+  // VERIF_LOG_CHANNEL_ID : channel privé admin où arrivent les demandes de vérif
+  VERIF_PENDING_ROLE_ID:  process.env.VERIF_PENDING_ROLE_ID  || '',
+  VERIF_APPROVED_ROLE_ID: process.env.VERIF_APPROVED_ROLE_ID || '',
+  VERIF_CHANNEL_ID:       process.env.VERIF_CHANNEL_ID       || '',
+  VERIF_LOG_CHANNEL_ID:   process.env.VERIF_LOG_CHANNEL_ID   || '',
 };
 
 // ============================================================
@@ -69,7 +75,10 @@ const FILES = {
   npcList:       path.join(DATA_DIR, 'npc_list.json'),
   tfList:        path.join(DATA_DIR, 'tf_list.json'),
   tournaments:   path.join(DATA_DIR, 'tournaments.json'),
-  jsonbinId:     path.join(DATA_DIR, 'jsonbin_id.json'),   // stocke l'ID du bin créé auto
+  jsonbinId:     path.join(DATA_DIR, 'jsonbin_id.json'),
+  verifConfig:   path.join(DATA_DIR, 'verif_config.json'),    // config vérification
+  blacklist:     path.join(DATA_DIR, 'blacklist.json'),        // liste noire
+  pendingVerifs: path.join(DATA_DIR, 'pending_verifs.json'),   // demandes en attente
 };
 
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -99,10 +108,9 @@ let _binId = CONFIG.JSONBIN_BIN_ID || loadJSON(FILES.jsonbinId, {}).id || '';
 const JSONBIN_HEADERS = () => ({
   'Content-Type':  'application/json',
   'X-Master-Key':  CONFIG.JSONBIN_MASTER_KEY,
-  'X-Bin-Versioning': 'false',    // toujours écraser, pas de versioning
+  'X-Bin-Versioning': 'false',
 });
 
-// Structure par défaut du bin
 const DEFAULT_GYMGIRLS = { girls: [], activeVotes: {} };
 
 async function jsonbinGet() {
@@ -124,8 +132,6 @@ async function jsonbinSet(data) {
     console.warn('[JSONBIN] Pas de Master Key configurée — données non sauvegardées en ligne.');
     return;
   }
-
-  // Créer le bin si inexistant
   if (!_binId) {
     try {
       const res = await axios.post('https://api.jsonbin.io/v3/b', data, {
@@ -140,7 +146,6 @@ async function jsonbinSet(data) {
     }
     return;
   }
-
   try {
     await axios.put(`https://api.jsonbin.io/v3/b/${_binId}`, data, {
       headers: JSONBIN_HEADERS(),
@@ -151,10 +156,9 @@ async function jsonbinSet(data) {
   }
 }
 
-// Cache local pour éviter trop d'appels réseau
 let _gymgirlsCache = null;
 let _cacheTs       = 0;
-const CACHE_TTL    = 30 * 1000; // 30 secondes
+const CACHE_TTL    = 30 * 1000;
 
 async function getGymgirls() {
   if (_gymgirlsCache && Date.now() - _cacheTs < CACHE_TTL) return _gymgirlsCache;
@@ -207,6 +211,21 @@ let npcList           = loadJSON(FILES.npcList,        {});
 let tfList            = loadJSON(FILES.tfList,         {});
 let tournamentsData   = loadJSON(FILES.tournaments,    {});
 
+// ── VÉRIFICATION ──────────────────────────────────────────────
+let verifConfig   = loadJSON(FILES.verifConfig, {
+  pendingRoleId:  CONFIG.VERIF_PENDING_ROLE_ID  || '',
+  approvedRoleId: CONFIG.VERIF_APPROVED_ROLE_ID || '',
+  verifChannelId: CONFIG.VERIF_CHANNEL_ID       || '',
+  logChannelId:   CONFIG.VERIF_LOG_CHANNEL_ID   || '',
+  enabled:        false,
+});
+let blacklistData   = loadJSON(FILES.blacklist,     {});   // { userId: { reason, by, at } }
+let pendingVerifs   = loadJSON(FILES.pendingVerifs, {});   // { userId: { logMessageId, ... } }
+
+function saveVerifConfig()   { saveJSON(FILES.verifConfig,   verifConfig);   }
+function saveBlacklist()     { saveJSON(FILES.blacklist,     blacklistData); }
+function savePendingVerifs() { saveJSON(FILES.pendingVerifs, pendingVerifs); }
+
 let ticketConfig = loadJSON(FILES.ticketConfig, {
   viewRoleId:  null,
   staffRoleId: null,
@@ -256,6 +275,179 @@ async function logSanction(guild, fields, title, color = '#FF4444') {
     await logChannel.send({ embeds: [e] });
   } catch (err) {
     console.error('[SANCTION LOG] Erreur envoi log :', err.message);
+  }
+}
+
+// ============================================================
+//  VÉRIFICATION — HELPER PRINCIPAL
+// ============================================================
+
+/**
+ * Calcule l'âge d'un compte en jours
+ */
+function accountAgeDays(userId) {
+  const createdAt = Number(BigInt(userId) >> 22n) + 1420070400000;
+  return Math.floor((Date.now() - createdAt) / (1000 * 60 * 60 * 24));
+}
+
+/**
+ * Formate une durée en "X ans Y mois Z jours" pour l'affichage
+ */
+function formatAge(days) {
+  if (days < 1)   return '< 1 jour 🚨';
+  if (days < 7)   return `${days} jours 🚨`;
+  if (days < 30)  return `${days} jours ⚠️`;
+  if (days < 365) return `${Math.floor(days / 30)} mois ${days % 30} jours`;
+  const years  = Math.floor(days / 365);
+  const months = Math.floor((days % 365) / 30);
+  return `${years} an${years > 1 ? 's' : ''} ${months > 0 ? months + ' mois' : ''}`;
+}
+
+/**
+ * Envoie le message de vérification dans le channel log admin
+ */
+async function sendVerifRequest(guild, member) {
+  if (!verifConfig.enabled || !verifConfig.logChannelId) return;
+
+  const logChannel = guild.channels.cache.get(verifConfig.logChannelId);
+  if (!logChannel) {
+    console.error('[VERIF] Channel log introuvable :', verifConfig.logChannelId);
+    return;
+  }
+
+  const ageDays    = accountAgeDays(member.id);
+  const ageStr     = formatAge(ageDays);
+  const isSuspect  = ageDays < 7;
+  const joinedAt   = member.joinedAt
+    ? `<t:${Math.floor(member.joinedAt.getTime() / 1000)}:F>`
+    : 'Inconnue';
+  const createdAt  = new Date(Number(BigInt(member.id) >> 22n) + 1420070400000);
+  const createdStr = `<t:${Math.floor(createdAt.getTime() / 1000)}:F>`;
+  const avatarUrl  = member.user.displayAvatarURL({ size: 256 });
+  const hasAvatar  = !!member.user.avatar;
+
+  // Fetch infos supplémentaires (MFA/A2F visible uniquement sur guild owner)
+  // Pour les membres normaux, on peut voir si la guild requiert MFA
+  const mfaRequired = guild.mfaLevel === 1;
+
+  // Couleur selon suspicion
+  const embedColor = isSuspect ? '#FF0000' : ageDays < 30 ? '#FFA500' : '#00C851';
+
+  const flags = [];
+  if (isSuspect) flags.push('🚨 **COMPTE RÉCENT** (< 7 jours)');
+  if (!hasAvatar) flags.push('⚠️ Pas d\'avatar (compte par défaut)');
+  if (mfaRequired) flags.push('ℹ️ Le serveur requiert la A2F');
+
+  const flagsStr = flags.length > 0 ? flags.join('\n') : '✅ Aucun signal suspect';
+
+  const verifEmbed = new EmbedBuilder()
+    .setColor(embedColor)
+    .setTitle(`${isSuspect ? '🚨' : '🔍'} Demande de vérification`)
+    .setThumbnail(avatarUrl)
+    .addFields(
+      {
+        name: '👤 Identité',
+        value: [
+          `**Pseudo** : ${member.user.tag}`,
+          `**Surnom** : ${member.nickname || '*aucun*'}`,
+          `**ID** : \`${member.id}\``,
+          `**Mention** : <@${member.id}>`,
+        ].join('\n'),
+        inline: false,
+      },
+      {
+        name: '📅 Dates',
+        value: [
+          `**Compte créé le** : ${createdStr}`,
+          `**Âge du compte** : ${ageStr}`,
+          `**A rejoint le** : ${joinedAt}`,
+        ].join('\n'),
+        inline: false,
+      },
+      {
+        name: '🛡️ Signaux de sécurité',
+        value: flagsStr,
+        inline: false,
+      },
+      {
+        name: '🎭 Avatar',
+        value: hasAvatar ? `[Voir l'avatar](${avatarUrl})` : '❌ Avatar par défaut Discord',
+        inline: true,
+      },
+      {
+        name: '🤖 Bot ?',
+        value: member.user.bot ? '✅ Oui (BOT)' : '❌ Non',
+        inline: true,
+      },
+    )
+    .setFooter({ text: `Demande reçue · ID ${member.id}` })
+    .setTimestamp();
+
+  // Boutons admin
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`verif_approve_${member.id}`)
+      .setLabel('✅  Approuver')
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`verif_refuse_${member.id}`)
+      .setLabel('❌  Refuser (kick)')
+      .setStyle(ButtonStyle.Danger),
+    new ButtonBuilder()
+      .setCustomId(`verif_blacklist_${member.id}`)
+      .setLabel('🚫  Blacklist + Kick')
+      .setStyle(ButtonStyle.Danger),
+  );
+
+  try {
+    const logMsg = await logChannel.send({
+      content: `${isSuspect ? '@here ' : ''}\`[VERIF]\` Nouveau membre en attente de vérification`,
+      embeds: [verifEmbed],
+      components: [row],
+    });
+
+    // Sauvegarder la demande en attente
+    pendingVerifs[member.id] = {
+      logMessageId: logMsg.id,
+      logChannelId: verifConfig.logChannelId,
+      userId:       member.id,
+      tag:          member.user.tag,
+      requestedAt:  new Date().toISOString(),
+    };
+    savePendingVerifs();
+
+    console.log(`[VERIF] Demande envoyée pour ${member.user.tag} (${member.id})`);
+  } catch (err) {
+    console.error('[VERIF] Erreur envoi demande :', err.message);
+  }
+}
+
+/**
+ * Désactive les boutons d'un message de vérification
+ */
+async function disableVerifButtons(guild, userId, status) {
+  const pending = pendingVerifs[userId];
+  if (!pending) return;
+
+  try {
+    const ch  = guild.channels.cache.get(pending.logChannelId);
+    if (!ch) return;
+    const msg = await ch.messages.fetch(pending.logMessageId).catch(() => null);
+    if (!msg) return;
+
+    const statusColors  = { approved: ButtonStyle.Success, refused: ButtonStyle.Secondary, blacklisted: ButtonStyle.Secondary };
+    const statusLabels  = { approved: '✅ Approuvé', refused: '❌ Refusé', blacklisted: '🚫 Blacklisté' };
+
+    const disabledRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`verif_done_${userId}`)
+        .setLabel(statusLabels[status] || 'Traité')
+        .setStyle(statusColors[status] || ButtonStyle.Secondary)
+        .setDisabled(true),
+    );
+    await msg.edit({ components: [disabledRow] }).catch(() => {});
+  } catch (err) {
+    console.error('[VERIF] Erreur désactivation boutons :', err.message);
   }
 }
 
@@ -426,7 +618,7 @@ const commands = {
           ].join('\n'), inline: false },
         { name: 'Utilitaires', value: '`!clear <nombre>` -- Supprime N messages (max 100)', inline: false },
       )
-      .setFooter({ text: 'Page 1 / 3 -- Tape !aide2 pour la moderation, !aide3 pour tickets & RR' });
+      .setFooter({ text: 'Page 1 / 4 -- Tape !aide2 pour la moderation, !aide3 pour tickets & RR, !aide4 pour la verification' });
 
     const e2 = embed('#FF4444')
       .setTitle('Aide -- Moderation')
@@ -451,7 +643,7 @@ const commands = {
             `Salon actuel : ${logChannelDisplay}`,
           ].join('\n'), inline: false },
       )
-      .setFooter({ text: 'Page 2 / 3 -- Tape !aide pour les commandes generales, !aide3 pour tickets & RR' });
+      .setFooter({ text: 'Page 2 / 4 -- Tape !aide pour les commandes generales, !aide3 pour tickets & RR' });
 
     const e3 = embed('#7289DA')
       .setTitle('Aide -- Tickets & Reaction Roles')
@@ -473,15 +665,49 @@ const commands = {
             '`!rr-delete <msgID>` -- Supprime un message RR',
           ].join('\n'), inline: false },
       )
-      .setFooter({ text: 'Page 3 / 3 -- Tape !aide pour les commandes generales, !aide2 pour la moderation' });
+      .setFooter({ text: 'Page 3 / 4 -- Tape !aide4 pour la vérification manuelle' });
+
+    const e4 = embed('#00C851')
+      .setTitle('Aide -- Vérification manuelle')
+      .setDescription('Système de vérification avec blacklist / whitelist.')
+      .addFields(
+        { name: 'Configuration (admin)', value: [
+            '`!verif-setup` -- Assistant de configuration interactif',
+            '`!verif-config` -- Affiche la configuration actuelle',
+            '`!verif-enable` / `!verif-disable` -- Active ou désactive le système',
+          ].join('\n'), inline: false },
+        { name: 'Gestion manuelle (admin)', value: [
+            '`!whitelist @user` -- Approuve directement un membre',
+            '`!blacklist @user [raison]` -- Blacklist + kick un membre',
+            '`!unblacklist @user` -- Retire de la blacklist',
+            '`!blacklist-list` -- Affiche toute la blacklist',
+            '`!pending-list` -- Liste les vérifications en attente',
+          ].join('\n'), inline: false },
+        { name: 'Fonctionnement', value: [
+            '1. Le membre clique sur la réaction ✅',
+            '2. Il reçoit le rôle "En attente" (accès channel vérif uniquement)',
+            '3. Un embed avec ses infos arrive dans le channel admin',
+            '4. Un admin clique sur ✅ Approuver, ❌ Refuser ou 🚫 Blacklist',
+            '5. Si approuvé → le membre reçoit le rôle d\'accès complet',
+          ].join('\n'), inline: false },
+        { name: 'Sécurité automatique', value: [
+            '• Comptes blacklistés → rejetés automatiquement à la réaction',
+            '• Comptes < 7 jours → signalés en rouge 🚨',
+            '• Comptes < 30 jours → signalés en orange ⚠️',
+            '• Sans avatar → signalé',
+          ].join('\n'), inline: false },
+      )
+      .setFooter({ text: 'Page 4 / 4 -- Système de vérification manuelle' });
 
     await message.reply({ embeds: [e1] });
     await message.channel.send({ embeds: [e2] });
     await message.channel.send({ embeds: [e3] });
+    await message.channel.send({ embeds: [e4] });
   },
 
   '!aide2': async (message) => { await commands['!aide'](message); },
   '!aide3': async (message) => { await commands['!aide'](message); },
+  '!aide4': async (message) => { await commands['!aide'](message); },
 
   // ── CLEAR ────────────────────────────────────────────────────
   '!clear': async (message, args) => {
@@ -1237,6 +1463,279 @@ const commands = {
   },
 
   // ============================================================
+  //  VÉRIFICATION MANUELLE — COMMANDES ADMIN
+  // ============================================================
+
+  /**
+   * !verif-setup
+   * Guide l'admin pour configurer le système de vérification
+   */
+  '!verif-setup': async (message, args) => {
+    if (!isAdmin(message.author.id)) return message.reply('Permission refusée.');
+
+    const parts = args.join(' ').split('|').map(s => s.trim());
+
+    // Mode affichage si pas d'args
+    if (parts.length < 4 || !parts[0]) {
+      return message.reply({
+        embeds: [new EmbedBuilder()
+          .setColor('#00C851')
+          .setTitle('⚙️ Configuration Vérification — Assistant')
+          .setDescription(
+            'Pour configurer le système, utilise :\n' +
+            '```\n!verif-setup @role-pending | @role-approuvé | #channel-verif | #channel-log-admin\n```\n\n' +
+            '**Explications :**\n' +
+            '• `@role-pending` — Rôle donné après réaction (accès limité)\n' +
+            '• `@role-approuvé` — Rôle donné après approbation admin (accès complet)\n' +
+            '• `#channel-verif` — Salon où le membre attend sa vérif\n' +
+            '• `#channel-log-admin` — Salon privé admin où arrivent les demandes\n\n' +
+            '**Config actuelle :**\n' +
+            `• Rôle pending : ${verifConfig.pendingRoleId  ? `<@&${verifConfig.pendingRoleId}>`  : '`non défini`'}\n` +
+            `• Rôle approuvé : ${verifConfig.approvedRoleId ? `<@&${verifConfig.approvedRoleId}>` : '`non défini`'}\n` +
+            `• Channel vérif : ${verifConfig.verifChannelId ? `<#${verifConfig.verifChannelId}>` : '`non défini`'}\n` +
+            `• Channel log : ${verifConfig.logChannelId    ? `<#${verifConfig.logChannelId}>`   : '`non défini`'}\n` +
+            `• Statut : ${verifConfig.enabled ? '✅ **ACTIVÉ**' : '❌ **DÉSACTIVÉ**'}`
+          )
+          .setFooter({ text: 'Après configuration, utilise !verif-enable pour activer' })],
+      });
+    }
+
+    // Extraction des roles et channels depuis les mentions
+    const roles    = message.mentions.roles;
+    const channels = message.mentions.channels;
+
+    if (roles.size < 2) return message.reply('Tu dois mentionner **2 rôles** : `@role-pending` et `@role-approuvé`.');
+    if (channels.size < 2) return message.reply('Tu dois mentionner **2 channels** : `#channel-verif` et `#channel-log-admin`.');
+
+    const rolesArr    = [...roles.values()];
+    const channelsArr = [...channels.values()];
+
+    verifConfig.pendingRoleId  = rolesArr[0].id;
+    verifConfig.approvedRoleId = rolesArr[1].id;
+    verifConfig.verifChannelId = channelsArr[0].id;
+    verifConfig.logChannelId   = channelsArr[1].id;
+    saveVerifConfig();
+
+    await message.reply({
+      embeds: [new EmbedBuilder()
+        .setColor('#00C851')
+        .setTitle('✅ Vérification configurée')
+        .addFields(
+          { name: 'Rôle pending',   value: `<@&${verifConfig.pendingRoleId}>`,  inline: true },
+          { name: 'Rôle approuvé',  value: `<@&${verifConfig.approvedRoleId}>`, inline: true },
+          { name: '\u200b',         value: '\u200b',                             inline: true },
+          { name: 'Channel vérif',  value: `<#${verifConfig.verifChannelId}>`,  inline: true },
+          { name: 'Channel log',    value: `<#${verifConfig.logChannelId}>`,    inline: true },
+          { name: '\u200b',         value: '\u200b',                             inline: true },
+        )
+        .setDescription(
+          '⚠️ **Pense aussi à :**\n' +
+          `1. Mettre à jour \`CONFIG.REACTION_ROLE.ROLE_ID\` avec l'ID du rôle pending : \`${verifConfig.pendingRoleId}\`\n` +
+          '2. Utiliser `!verif-enable` pour activer le système\n' +
+          '3. Configurer les permissions du channel vérif pour que seul le rôle pending puisse le voir'
+        )
+        .setFooter({ text: 'Système prêt · Utilise !verif-enable pour activer' })],
+    });
+  },
+
+  '!verif-config': async (message) => {
+    if (!isAdmin(message.author.id)) return message.reply('Permission refusée.');
+    const pendingCount = Object.keys(pendingVerifs).length;
+    const blCount      = Object.keys(blacklistData).length;
+    await message.reply({
+      embeds: [new EmbedBuilder()
+        .setColor(verifConfig.enabled ? '#00C851' : '#FF4444')
+        .setTitle(`🔍 Config Vérification — ${verifConfig.enabled ? '✅ ACTIVÉ' : '❌ DÉSACTIVÉ'}`)
+        .addFields(
+          { name: 'Rôle pending',         value: verifConfig.pendingRoleId  ? `<@&${verifConfig.pendingRoleId}>`  : '`non défini`', inline: true },
+          { name: 'Rôle approuvé',        value: verifConfig.approvedRoleId ? `<@&${verifConfig.approvedRoleId}>` : '`non défini`', inline: true },
+          { name: '\u200b',               value: '\u200b', inline: true },
+          { name: 'Channel vérif',        value: verifConfig.verifChannelId ? `<#${verifConfig.verifChannelId}>` : '`non défini`', inline: true },
+          { name: 'Channel log admin',    value: verifConfig.logChannelId   ? `<#${verifConfig.logChannelId}>`   : '`non défini`', inline: true },
+          { name: '\u200b',               value: '\u200b', inline: true },
+          { name: '⏳ En attente',        value: `${pendingCount} membre(s)`, inline: true },
+          { name: '🚫 Blacklistés',       value: `${blCount} entrée(s)`,      inline: true },
+        )
+        .setFooter({ text: '!verif-enable / !verif-disable · !verif-setup pour reconfigurer' })],
+    });
+  },
+
+  '!verif-enable': async (message) => {
+    if (!isAdmin(message.author.id)) return message.reply('Permission refusée.');
+    if (!verifConfig.pendingRoleId || !verifConfig.approvedRoleId || !verifConfig.logChannelId) {
+      return message.reply('❌ Configure d\'abord le système avec `!verif-setup` avant de l\'activer.');
+    }
+    verifConfig.enabled = true; saveVerifConfig();
+    await message.reply('✅ Système de vérification **activé**. Les nouvelles réactions déclencheront le flux de vérification manuelle.');
+  },
+
+  '!verif-disable': async (message) => {
+    if (!isAdmin(message.author.id)) return message.reply('Permission refusée.');
+    verifConfig.enabled = false; saveVerifConfig();
+    await message.reply('❌ Système de vérification **désactivé**. Le comportement par défaut (rôle direct) est restauré.');
+  },
+
+  // ── WHITELIST / BLACKLIST ─────────────────────────────────────
+  '!whitelist': async (message) => {
+    if (!isAdmin(message.author.id)) return message.reply('Permission refusée.');
+    const target = message.mentions.members.first();
+    if (!target) return message.reply('Mentionne un utilisateur : `!whitelist @user`');
+
+    if (!verifConfig.approvedRoleId) return message.reply('Rôle approuvé non configuré. Utilise `!verif-setup`.');
+
+    const approvedRole = message.guild.roles.cache.get(verifConfig.approvedRoleId);
+    if (!approvedRole) return message.reply(`Rôle approuvé introuvable (ID: \`${verifConfig.approvedRoleId}\`).`);
+
+    try {
+      // Ajouter le rôle approuvé
+      await target.roles.add(approvedRole, `Approbation manuelle par ${message.author.tag}`);
+
+      // Retirer le rôle pending si présent
+      if (verifConfig.pendingRoleId && target.roles.cache.has(verifConfig.pendingRoleId)) {
+        const pendingRole = message.guild.roles.cache.get(verifConfig.pendingRoleId);
+        if (pendingRole) await target.roles.remove(pendingRole, 'Vérification approuvée').catch(() => {});
+      }
+
+      // Désactiver les boutons du message de log
+      await disableVerifButtons(message.guild, target.id, 'approved');
+      delete pendingVerifs[target.id]; savePendingVerifs();
+
+      await message.reply({
+        embeds: [new EmbedBuilder()
+          .setColor('#00C851')
+          .setTitle('✅ Membre approuvé')
+          .setDescription(`<@${target.id}> a été approuvé manuellement et a maintenant accès au serveur.`)
+          .addFields(
+            { name: 'Rôle attribué', value: `<@&${verifConfig.approvedRoleId}>`, inline: true },
+            { name: 'Par',           value: `<@${message.author.id}>`,           inline: true },
+          )],
+      });
+
+      // Notifier le membre dans le channel vérif si configuré
+      if (verifConfig.verifChannelId) {
+        const verifCh = message.guild.channels.cache.get(verifConfig.verifChannelId);
+        if (verifCh) {
+          await verifCh.send({
+            content: `<@${target.id}>`,
+            embeds: [new EmbedBuilder()
+              .setColor('#00C851')
+              .setTitle('✅ Vérification approuvée !')
+              .setDescription('Tu as été vérifié et tu as maintenant accès au serveur. Bienvenue ! 🎉')],
+          }).catch(() => {});
+        }
+      }
+    } catch (err) { await message.reply(`Erreur : ${err.message}`); }
+  },
+
+  '!blacklist': async (message, args) => {
+    if (!isAdmin(message.author.id)) return message.reply('Permission refusée.');
+    const target = message.mentions.members.first();
+    if (!target) return message.reply('Mentionne un utilisateur : `!blacklist @user [raison]`');
+    if (isAdmin(target.id)) return message.reply('Impossible de blacklister un admin.');
+
+    const reason = args.slice(1).join(' ') || 'Aucune raison fournie';
+
+    blacklistData[target.id] = {
+      tag:    target.user.tag,
+      reason,
+      by:     message.author.id,
+      at:     new Date().toISOString(),
+    };
+    saveBlacklist();
+
+    // Désactiver les boutons de log si en attente
+    await disableVerifButtons(message.guild, target.id, 'blacklisted');
+    delete pendingVerifs[target.id]; savePendingVerifs();
+
+    try {
+      await target.kick(`Blacklist par ${message.author.tag} : ${reason}`);
+    } catch (err) {
+      console.warn('[BLACKLIST] Impossible de kick :', err.message);
+    }
+
+    await message.reply({
+      embeds: [new EmbedBuilder()
+        .setColor('#FF0000')
+        .setTitle('🚫 Membre blacklisté & kické')
+        .addFields(
+          { name: 'Membre', value: `${target.user.tag} (${target.id})`, inline: false },
+          { name: 'Raison', value: reason,                               inline: false },
+          { name: 'Par',    value: `<@${message.author.id}>`,           inline: true },
+        )
+        .setFooter({ text: 'Il sera bloqué automatiquement s\'il tente de rejoindre à nouveau' })],
+    });
+    await logSanction(message.guild, [
+      { name: 'Membre', value: target.user.tag,           inline: true },
+      { name: 'Par',    value: `<@${message.author.id}>`, inline: true },
+      { name: 'Raison', value: reason,                    inline: false },
+    ], `Blacklist — ${target.user.tag}`, '#FF0000');
+  },
+
+  '!unblacklist': async (message) => {
+    if (!isAdmin(message.author.id)) return message.reply('Permission refusée.');
+    const target = message.mentions.users.first();
+    if (!target) return message.reply('Mentionne un utilisateur : `!unblacklist @user`');
+
+    if (!blacklistData[target.id]) return message.reply(`<@${target.id}> n'est pas dans la blacklist.`);
+
+    const entry = blacklistData[target.id];
+    delete blacklistData[target.id]; saveBlacklist();
+
+    await message.reply({
+      embeds: [new EmbedBuilder()
+        .setColor('#00C851')
+        .setTitle('✅ Blacklist levée')
+        .addFields(
+          { name: 'Membre',            value: entry.tag || target.tag, inline: true },
+          { name: 'Par',               value: `<@${message.author.id}>`, inline: true },
+          { name: 'Raison initiale',   value: entry.reason,              inline: false },
+          { name: 'Blacklisté le',     value: new Date(entry.at).toLocaleString('fr-FR'), inline: false },
+        )
+        .setFooter({ text: 'Il pourra rejoindre à nouveau et sera soumis à la vérification normale' })],
+    });
+  },
+
+  '!blacklist-list': async (message) => {
+    if (!isAdmin(message.author.id)) return message.reply('Permission refusée.');
+    const entries = Object.entries(blacklistData);
+    if (entries.length === 0) return message.reply('La blacklist est vide. ✅');
+
+    const fields = entries.slice(0, 25).map(([userId, data]) => ({
+      name: `${data.tag || userId} · \`${userId}\``,
+      value: `Raison : ${data.reason}\nPar <@${data.by}> le ${new Date(data.at).toLocaleDateString('fr-FR')}`,
+      inline: false,
+    }));
+
+    await message.reply({
+      embeds: [new EmbedBuilder()
+        .setColor('#FF0000')
+        .setTitle(`🚫 Blacklist — ${entries.length} entrée(s)`)
+        .addFields(fields)
+        .setFooter({ text: entries.length > 25 ? `Affiche 25/${entries.length} entrées` : `${entries.length} entrée(s) au total` })],
+    });
+  },
+
+  '!pending-list': async (message) => {
+    if (!isAdmin(message.author.id)) return message.reply('Permission refusée.');
+    const entries = Object.entries(pendingVerifs);
+    if (entries.length === 0) return message.reply('Aucune vérification en attente. ✅');
+
+    const fields = entries.slice(0, 25).map(([userId, data]) => ({
+      name: `${data.tag} · \`${userId}\``,
+      value: `Demande reçue le ${new Date(data.requestedAt).toLocaleString('fr-FR')}\n[Voir le message](https://discord.com/channels/${message.guild.id}/${data.logChannelId}/${data.logMessageId})`,
+      inline: false,
+    }));
+
+    await message.reply({
+      embeds: [new EmbedBuilder()
+        .setColor('#FFA500')
+        .setTitle(`⏳ Vérifications en attente — ${entries.length}`)
+        .addFields(fields)
+        .setFooter({ text: 'Utilise les boutons dans le channel log pour traiter chaque demande' })],
+    });
+  },
+
+  // ============================================================
   //  RATING GYMGIRL — SYSTÈME ELO
   // ============================================================
 
@@ -1252,18 +1751,15 @@ const commands = {
       return message.reply('Pas assez de gymgirls dans la base (minimum 2). Un admin peut en ajouter avec `!rate-add <nom> | <url>`.');
     }
 
-    // Un seul vote actif par salon
     if (db.activeVotes && db.activeVotes[message.channel.id]) {
       return message.reply('Un vote est déjà en cours dans ce salon. Attends la fin ou que le timer expire (5 min).');
     }
 
-    // Tirage de 2 gymgirls différentes (pondéré par l'inverse de leur ELO pour équilibrer les matchs)
     const shuffled = [...girls].sort(() => Math.random() - 0.5);
     const girlA    = shuffled[0];
     const girlB    = shuffled[1];
     const voteId   = Date.now().toString(36);
 
-    // Boutons
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId(`rate_${voteId}_A`)
@@ -1279,7 +1775,6 @@ const commands = {
         .setStyle(ButtonStyle.Danger),
     );
 
-    // Header embed
     const headerEmbed = new EmbedBuilder()
       .setColor('#FF6B9D')
       .setTitle('⚡ Qui a le meilleur physique ?')
@@ -1293,7 +1788,6 @@ const commands = {
 
     await message.channel.send({ embeds: [headerEmbed] });
 
-    // Envoyer les deux images
     await message.channel.send({ content: `⬅️  **${girlA.name}**`, files: [girlA.imageUrl] })
       .catch(() => message.channel.send({ content: `⬅️  **${girlA.name}** — ${girlA.imageUrl}` }));
 
@@ -1302,7 +1796,6 @@ const commands = {
 
     const voteMsg = await message.channel.send({ components: [row] });
 
-    // Sauvegarder le vote actif dans JSONBin
     if (!db.activeVotes) db.activeVotes = {};
     db.activeVotes[message.channel.id] = {
       voteId,
@@ -1315,7 +1808,6 @@ const commands = {
     };
     await saveGymgirls(db);
 
-    // Auto-expire après 5 minutes
     setTimeout(async () => {
       try {
         const fresh = await getGymgirls();
@@ -1458,7 +1950,6 @@ const commands = {
     if (!role) return message.reply(`Rôle introuvable (ID : \`${CONFIG.RATING_ROLE_ID}\`). Vérifie la config.`);
 
     if (target.roles.cache.has(CONFIG.RATING_ROLE_ID)) {
-      // Retirer le rôle si déjà présent (toggle)
       await target.roles.remove(role, `Rating role retiré par ${message.author.tag}`);
       return message.reply({
         embeds: [new EmbedBuilder()
@@ -1539,18 +2030,196 @@ client.on('interactionCreate', async (interaction) => {
   if (!interaction.isButton()) return;
   const customId = interaction.customId;
 
+  // ── Boutons de VÉRIFICATION ────────────────────────────────
+  if (customId.startsWith('verif_')) {
+    // Seuls les admins peuvent interagir
+    if (!isAdmin(interaction.user.id)) {
+      return interaction.reply({ content: '❌ Seuls les admins peuvent traiter les vérifications.', ephemeral: true });
+    }
+
+    const parts  = customId.split('_');
+    const action = parts[1]; // approve | refuse | blacklist | done
+    const userId = parts[2];
+
+    // Bouton "Traité" (déjà désactivé)
+    if (action === 'done') {
+      return interaction.reply({ content: 'Cette demande a déjà été traitée.', ephemeral: true });
+    }
+
+    // Récupérer le membre
+    const member = await interaction.guild.members.fetch(userId).catch(() => null);
+    if (!member) {
+      // Membre parti — nettoyer quand même
+      delete pendingVerifs[userId]; savePendingVerifs();
+      await disableVerifButtons(interaction.guild, userId, 'refused');
+      return interaction.reply({ content: '❌ Le membre a quitté le serveur. Demande nettoyée.', ephemeral: true });
+    }
+
+    // ── APPROUVER ──
+    if (action === 'approve') {
+      if (!verifConfig.approvedRoleId) {
+        return interaction.reply({ content: '❌ Rôle approuvé non configuré.', ephemeral: true });
+      }
+      const approvedRole = interaction.guild.roles.cache.get(verifConfig.approvedRoleId);
+      if (!approvedRole) {
+        return interaction.reply({ content: `❌ Rôle approuvé introuvable (ID: ${verifConfig.approvedRoleId}).`, ephemeral: true });
+      }
+
+      try {
+        await member.roles.add(approvedRole, `Approuvé par ${interaction.user.tag}`);
+
+        // Retirer le rôle pending
+        if (verifConfig.pendingRoleId && member.roles.cache.has(verifConfig.pendingRoleId)) {
+          const pendingRole = interaction.guild.roles.cache.get(verifConfig.pendingRoleId);
+          if (pendingRole) await member.roles.remove(pendingRole).catch(() => {});
+        }
+
+        await disableVerifButtons(interaction.guild, userId, 'approved');
+        delete pendingVerifs[userId]; savePendingVerifs();
+
+        // Notifier le membre
+        if (verifConfig.verifChannelId) {
+          const verifCh = interaction.guild.channels.cache.get(verifConfig.verifChannelId);
+          if (verifCh) {
+            await verifCh.send({
+              content: `<@${userId}>`,
+              embeds: [new EmbedBuilder()
+                .setColor('#00C851')
+                .setTitle('✅ Vérification approuvée !')
+                .setDescription('Tu as été vérifié et tu as maintenant accès complet au serveur. Bienvenue ! 🎉')],
+            }).catch(() => {});
+          }
+        }
+
+        await interaction.reply({
+          embeds: [new EmbedBuilder()
+            .setColor('#00C851')
+            .setTitle('✅ Approuvé')
+            .setDescription(`<@${userId}> a été approuvé par <@${interaction.user.id}>.`)
+            .addFields({ name: 'Rôle attribué', value: `<@&${verifConfig.approvedRoleId}>`, inline: true })],
+          ephemeral: true,
+        });
+
+        // Mise à jour de l'embed original pour indiquer le statut
+        await interaction.message.edit({
+          embeds: [interaction.message.embeds[0].toJSON()
+            ? new EmbedBuilder(interaction.message.embeds[0].toJSON())
+                .setColor('#00C851')
+                .setTitle(`✅ APPROUVÉ — ${interaction.message.embeds[0].title?.replace(/^[^\s]+\s/, '') || 'Demande de vérification'}`)
+                .setFooter({ text: `Approuvé par ${interaction.user.tag} · ${new Date().toLocaleString('fr-FR')}` })
+            : interaction.message.embeds[0]],
+        }).catch(() => {});
+
+      } catch (err) {
+        return interaction.reply({ content: `Erreur : ${err.message}`, ephemeral: true });
+      }
+      return;
+    }
+
+    // ── REFUSER (kick) ──
+    if (action === 'refuse') {
+      try {
+        // Notifier avant kick
+        if (verifConfig.verifChannelId) {
+          const verifCh = interaction.guild.channels.cache.get(verifConfig.verifChannelId);
+          if (verifCh) {
+            await verifCh.send({
+              content: `<@${userId}>`,
+              embeds: [new EmbedBuilder()
+                .setColor('#FF4444')
+                .setTitle('❌ Vérification refusée')
+                .setDescription('Ta demande d\'accès a été refusée par le staff. Tu vas être retiré du serveur.')],
+            }).catch(() => {});
+          }
+        }
+
+        await new Promise(r => setTimeout(r, 2000)); // laisser le temps de lire
+        await member.kick(`Refus de vérification par ${interaction.user.tag}`).catch(() => {});
+
+        await disableVerifButtons(interaction.guild, userId, 'refused');
+        delete pendingVerifs[userId]; savePendingVerifs();
+
+        await interaction.reply({
+          embeds: [new EmbedBuilder()
+            .setColor('#FF4444')
+            .setTitle('❌ Refusé & kické')
+            .setDescription(`<@${userId}> a été refusé et kické par <@${interaction.user.id}>.`)],
+          ephemeral: true,
+        });
+
+        // Mise à jour embed
+        await interaction.message.edit({
+          embeds: [interaction.message.embeds[0].toJSON()
+            ? new EmbedBuilder(interaction.message.embeds[0].toJSON())
+                .setColor('#FF4444')
+                .setTitle(`❌ REFUSÉ — ${interaction.message.embeds[0].title?.replace(/^[^\s]+\s/, '') || 'Demande de vérification'}`)
+                .setFooter({ text: `Refusé par ${interaction.user.tag} · ${new Date().toLocaleString('fr-FR')}` })
+            : interaction.message.embeds[0]],
+        }).catch(() => {});
+
+      } catch (err) {
+        return interaction.reply({ content: `Erreur : ${err.message}`, ephemeral: true });
+      }
+      return;
+    }
+
+    // ── BLACKLIST + KICK ──
+    if (action === 'blacklist') {
+      try {
+        blacklistData[userId] = {
+          tag:    member.user.tag,
+          reason: `Blacklist via vérification par ${interaction.user.tag}`,
+          by:     interaction.user.id,
+          at:     new Date().toISOString(),
+        };
+        saveBlacklist();
+
+        await member.kick(`Blacklist lors vérification par ${interaction.user.tag}`).catch(() => {});
+
+        await disableVerifButtons(interaction.guild, userId, 'blacklisted');
+        delete pendingVerifs[userId]; savePendingVerifs();
+
+        await interaction.reply({
+          embeds: [new EmbedBuilder()
+            .setColor('#8B0000')
+            .setTitle('🚫 Blacklisté & kické')
+            .setDescription(`<@${userId}> a été blacklisté et kické par <@${interaction.user.id}>.\nIl sera automatiquement bloqué s'il tente de rejoindre.`)],
+          ephemeral: true,
+        });
+
+        // Mise à jour embed
+        await interaction.message.edit({
+          embeds: [interaction.message.embeds[0].toJSON()
+            ? new EmbedBuilder(interaction.message.embeds[0].toJSON())
+                .setColor('#8B0000')
+                .setTitle(`🚫 BLACKLISTÉ — ${interaction.message.embeds[0].title?.replace(/^[^\s]+\s/, '') || 'Demande de vérification'}`)
+                .setFooter({ text: `Blacklisté par ${interaction.user.tag} · ${new Date().toLocaleString('fr-FR')}` })
+            : interaction.message.embeds[0]],
+        }).catch(() => {});
+
+        await logSanction(interaction.guild, [
+          { name: 'Membre', value: member.user.tag,           inline: true },
+          { name: 'Par',    value: `<@${interaction.user.id}>`, inline: true },
+          { name: 'Motif',  value: 'Blacklist lors vérification', inline: false },
+        ], `Blacklist Vérif — ${member.user.tag}`, '#8B0000');
+
+      } catch (err) {
+        return interaction.reply({ content: `Erreur : ${err.message}`, ephemeral: true });
+      }
+      return;
+    }
+  }
+
   // ── Boutons de RATING ──────────────────────────────────────
   if (customId.startsWith('rate_')) {
     const parts  = customId.split('_');
     const voteId = parts[1];
-    const choice = parts[2]; // A | B | skip | expired
+    const choice = parts[2];
 
-    // Bouton expiré
     if (voteId === 'expired') {
       return interaction.reply({ content: 'Ce vote a expiré.', ephemeral: true });
     }
 
-    // Vérif rôle
     const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
     if (!member || !hasRatingRole(member)) {
       return interaction.reply({ content: 'Tu n\'as pas le rôle requis pour voter.', ephemeral: true });
@@ -1566,14 +2235,12 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.reply({ content: 'Tu as déjà voté sur ce duel.', ephemeral: true });
     }
 
-    // Skip
     if (choice === 'skip') {
       active.votedUsers.push(interaction.user.id);
       await saveGymgirls(db);
       return interaction.reply({ content: '⏭️ Skip enregistré.', ephemeral: true });
     }
 
-    // Vote A ou B
     const girlA   = (db.girls || []).find(g => g.id === active.girlAId);
     const girlB   = (db.girls || []).find(g => g.id === active.girlBId);
     if (!girlA || !girlB) return interaction.reply({ content: 'Erreur : données corrompues.', ephemeral: true });
@@ -1581,7 +2248,6 @@ client.on('interactionCreate', async (interaction) => {
     const winner = choice === 'A' ? girlA : girlB;
     const loser  = choice === 'A' ? girlB : girlA;
 
-    // Calcul ELO (K=32)
     const K         = 32;
     const expectedW = 1 / (1 + Math.pow(10, (loser.elo - winner.elo) / 400));
     const gainW     = Math.round(K * (1 - expectedW));
@@ -1681,7 +2347,7 @@ client.on('messageCreate', async (message) => {
 });
 
 // ============================================================
-//  REACTION ROLES
+//  REACTION ROLES (dont vérification manuelle)
 // ============================================================
 
 client.on('messageReactionAdd', async (reaction, user) => {
@@ -1693,10 +2359,85 @@ client.on('messageReactionAdd', async (reaction, user) => {
   const emojiName = reaction.emoji.name;
   const { MESSAGE_ID, CHANNEL_ID, ROLE_ID, EMOJI } = CONFIG.REACTION_ROLE;
 
+  // ── Message de vérification principal ──
   if (msgId === MESSAGE_ID && reaction.message.channel.id === CHANNEL_ID && emojiName === EMOJI) {
+    const guild  = reaction.message.guild;
+    const member = await guild.members.fetch(user.id).catch(() => null);
+    if (!member) return;
+
+    // Vérifier si blacklisté
+    if (blacklistData[user.id]) {
+      console.log(`[VERIF] ${user.tag} est blacklisté — rejet automatique`);
+      try { await reaction.users.remove(user.id); } catch {}
+      try {
+        await user.send({
+          embeds: [new EmbedBuilder()
+            .setColor('#8B0000')
+            .setTitle('🚫 Accès refusé')
+            .setDescription('Tu es sur la liste noire de ce serveur et ne peux pas rejoindre.')],
+        });
+      } catch {}
+      // Kick discret
+      await member.kick('Blacklisté — tentative de rejoindre le serveur').catch(() => {});
+      return;
+    }
+
+    // Mode vérification manuelle activé
+    if (verifConfig.enabled && verifConfig.pendingRoleId) {
+      const pendingRole = guild.roles.cache.get(verifConfig.pendingRoleId);
+      if (!pendingRole) {
+        console.error('[VERIF] Rôle pending introuvable :', verifConfig.pendingRoleId);
+        return;
+      }
+
+      // Déjà en attente ?
+      if (pendingVerifs[user.id]) {
+        console.log(`[VERIF] ${user.tag} a déjà une demande en attente`);
+        return;
+      }
+
+      // Déjà approuvé ?
+      if (verifConfig.approvedRoleId && member.roles.cache.has(verifConfig.approvedRoleId)) {
+        console.log(`[VERIF] ${user.tag} est déjà approuvé`);
+        return;
+      }
+
+      try {
+        await member.roles.add(pendingRole, 'En attente de vérification manuelle');
+        console.log(`[VERIF] Rôle pending attribué à ${user.tag}`);
+
+        // Message dans le channel de vérif
+        if (verifConfig.verifChannelId) {
+          const verifCh = guild.channels.cache.get(verifConfig.verifChannelId);
+          if (verifCh) {
+            await verifCh.send({
+              content: `<@${user.id}>`,
+              embeds: [new EmbedBuilder()
+                .setColor('#FFA500')
+                .setTitle('⏳ Vérification en cours')
+                .setDescription(
+                  'Bienvenue ! Tu es actuellement en attente de vérification par le staff.\n\n' +
+                  '> Un admin va examiner ton profil et te donner accès au serveur.\n' +
+                  '> Merci de patienter — cela peut prendre quelques heures.\n\n' +
+                  'En cas de problème, contacte un admin directement.'
+                )
+                .setFooter({ text: 'Ne quitte pas le serveur, tu perdrais ton statut de vérification' })],
+            }).catch(() => {});
+          }
+        }
+
+        // Envoyer la demande aux admins
+        await sendVerifRequest(guild, member);
+
+      } catch (err) {
+        console.error('[VERIF] Erreur attribution rôle pending :', err.message);
+      }
+      return;
+    }
+
+    // Mode classique (pas de vérification manuelle)
     try {
-      const member = await reaction.message.guild.members.fetch(user.id);
-      const role   = reaction.message.guild.roles.cache.get(ROLE_ID);
+      const role = guild.roles.cache.get(ROLE_ID);
       if (!role) return console.error('[REACTION ROLE] Role introuvable :', ROLE_ID);
       await member.roles.add(role);
       try { await user.send('Tu as bien recu l\'acces au serveur ! Bienvenue !'); } catch {}
@@ -1704,6 +2445,7 @@ client.on('messageReactionAdd', async (reaction, user) => {
     return;
   }
 
+  // ── Multi-RR classique ──
   if (reactionRolesData[msgId]) {
     const roleId = reactionRolesData[msgId].roles[emojiName];
     if (!roleId) return;
@@ -1744,6 +2486,47 @@ client.on('messageReactionRemove', async (reaction, user) => {
       if (!role) return;
       await member.roles.remove(role);
     } catch (err) { console.error('[MULTI-RR] Erreur retrait role :', err.message); }
+  }
+});
+
+// ============================================================
+//  GUILDMEMBERADD — Vérification blacklist à l'arrivée
+// ============================================================
+
+client.on('guildMemberAdd', async (member) => {
+  // Si le membre est blacklisté, on le kick immédiatement
+  if (blacklistData[member.id]) {
+    console.log(`[VERIF] Membre blacklisté détecté à l'arrivée : ${member.user.tag}`);
+    try {
+      await member.send({
+        embeds: [new EmbedBuilder()
+          .setColor('#8B0000')
+          .setTitle('🚫 Accès refusé')
+          .setDescription('Tu es sur la liste noire de ce serveur.')],
+      }).catch(() => {});
+      await member.kick('Blacklisté — entrée bloquée automatiquement');
+    } catch (err) {
+      console.error('[VERIF] Erreur kick blacklist :', err.message);
+    }
+
+    // Notifier dans le log
+    if (verifConfig.logChannelId) {
+      const logCh = member.guild.channels.cache.get(verifConfig.logChannelId);
+      if (logCh) {
+        await logCh.send({
+          embeds: [new EmbedBuilder()
+            .setColor('#8B0000')
+            .setTitle('🚫 Tentative d\'accès — Blacklisté')
+            .setDescription(`<@${member.id}> (${member.user.tag}) a tenté de rejoindre mais est blacklisté.`)
+            .addFields(
+              { name: 'ID', value: member.id, inline: true },
+              { name: 'Blacklisté le', value: new Date(blacklistData[member.id].at).toLocaleString('fr-FR'), inline: true },
+              { name: 'Raison', value: blacklistData[member.id].reason, inline: false },
+            )
+            .setTimestamp()],
+        }).catch(() => {});
+      }
+    }
   }
 });
 
@@ -1917,6 +2700,9 @@ client.once('ready', async () => {
   console.log(`Sanction log channel: ${sanctionLogData.channelId || 'non defini'}`);
   console.log(`Warns charges: ${Object.keys(warnsData).length} membre(s)`);
   console.log(`Jails actifs: ${Object.keys(jailsData).length}`);
+  console.log(`[VERIF] Système: ${verifConfig.enabled ? 'ACTIVÉ' : 'DÉSACTIVÉ'}`);
+  console.log(`[VERIF] Blacklist: ${Object.keys(blacklistData).length} entrée(s)`);
+  console.log(`[VERIF] En attente: ${Object.keys(pendingVerifs).length} demande(s)`);
 
   await restoreTimers();
   checkTikTokLive();
@@ -1924,6 +2710,9 @@ client.once('ready', async () => {
 });
 
 client.on('error', (err) => console.error('[Discord] Erreur client:', err));
+
+// Ajouter GuildMembers intent pour guildMemberAdd
+// Note : assurez-vous d'avoir activé "Server Members Intent" dans le portail dev Discord
 
 const TOKEN = process.env.DISCORD_TOKEN;
 if (!TOKEN) { console.error('DISCORD_TOKEN manquant !'); process.exit(1); }
