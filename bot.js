@@ -663,6 +663,7 @@ const commands = {
             '`!rr-remove <msgID> | <emoji>` -- Retire un emoji/role',
             '`!rr-list` -- Liste tous les messages RR',
             '`!rr-delete <msgID>` -- Supprime un message RR',
+            '`!clearrole` -- Retire le rôle accès à tous les membres (admin)',
           ].join('\n'), inline: false },
       )
       .setFooter({ text: 'Page 3 / 4 -- Tape !aide4 pour la vérification manuelle' });
@@ -1972,6 +1973,55 @@ const commands = {
         )
         .setFooter({ text: 'Il peut maintenant utiliser !rate et !rate-top' })],
     });
+  },
+
+  // ── CLEARROLE ────────────────────────────────────────────────
+  '!clearrole': async (message) => {
+    if (!isAdmin(message.author.id)) return message.reply('Permission refusée.');
+    const TARGET_ROLE_ID = '1487674672865611806';
+    const guild = message.guild;
+    const role = guild.roles.cache.get(TARGET_ROLE_ID);
+    if (!role) return message.reply(`Rôle introuvable (ID : \`${TARGET_ROLE_ID}\`).`);
+    const statusMsg = await message.reply(`🔄 Récupération des membres avec le rôle **${role.name}**...`);
+    try {
+      await guild.members.fetch();
+      const membersWithRole = guild.members.cache.filter(m => m.roles.cache.has(TARGET_ROLE_ID));
+      if (membersWithRole.size === 0) {
+        return statusMsg.edit(`✅ Aucun membre ne possède le rôle **${role.name}**.`);
+      }
+      await statusMsg.edit(`🔄 Suppression du rôle **${role.name}** sur **${membersWithRole.size}** membre(s)...`);
+      let success = 0;
+      let failed  = 0;
+      for (const [, member] of membersWithRole) {
+        try {
+          await member.roles.remove(role, `!clearrole exécuté par ${message.author.tag}`);
+          success++;
+        } catch {
+          failed++;
+        }
+      }
+      await statusMsg.edit({
+        embeds: [new EmbedBuilder()
+          .setColor(failed > 0 ? '#FFA500' : '#00FF66')
+          .setTitle('✅ Clearrole terminé')
+          .addFields(
+            { name: 'Rôle ciblé',   value: `<@&${TARGET_ROLE_ID}>`,        inline: true },
+            { name: '✅ Succès',     value: `${success} membre(s)`,          inline: true },
+            { name: '❌ Échecs',     value: `${failed} membre(s)`,           inline: true },
+            { name: 'Exécuté par',  value: `<@${message.author.id}>`,       inline: true },
+          )
+          .setFooter({ text: 'Le rôle a été retiré de tous les membres accessibles' })
+          .setTimestamp()],
+      });
+      await logSanction(guild, [
+        { name: 'Rôle',         value: `<@&${TARGET_ROLE_ID}>`,       inline: true },
+        { name: 'Par',          value: `<@${message.author.id}>`,     inline: true },
+        { name: 'Retirés',      value: `${success}`,                  inline: true },
+        { name: 'Échecs',       value: `${failed}`,                   inline: true },
+      ], 'Clearrole', '#FFA500');
+    } catch (err) {
+      await statusMsg.edit(`❌ Erreur : ${err.message}`);
+    }
   },
 };
 
