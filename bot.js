@@ -241,6 +241,15 @@ function saveNpcList()        { saveJSON(FILES.npcList,       npcList); }
 function saveTfList()         { saveJSON(FILES.tfList,        tfList); }
 function saveTournaments()    { saveJSON(FILES.tournaments,   tournamentsData); }
 
+// ── LIKE AUTO ─────────────────────────────────────────────────
+// ID du membre dont TOUS les messages sont likés automatiquement
+const LIKE_TARGET_USER_ID = '980099925071241227';
+let likeEnabled = false;   // activé/désactivé via !like-enable / !like-disable
+
+// ── SONDAGES EN COURS ────────────────────────────────────────
+// { messageId: { question, options: [{label, votes}], voters: Set } }
+const activeSondages = {};
+
 // ============================================================
 //  CLIENT DISCORD
 // ============================================================
@@ -1975,6 +1984,249 @@ const commands = {
     });
   },
 
+  // ── LIVE (vérification manuelle TikTok) ──────────────────────
+  '!live': async (message) => {
+    const statusMsg = await message.reply({ embeds: [embed('#FF0050').setTitle('Vérification TikTok en cours...').setDescription(`Interrogation de TikTok pour **@${CONFIG.TIKTOK_USERNAME}**...`)] });
+    try {
+      const headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
+        'Sec-Fetch-Mode': 'navigate',
+      };
+      const response = await axios.get(`https://www.tiktok.com/@${CONFIG.TIKTOK_USERNAME}/live`, { headers, timeout: 15000, maxRedirects: 5 });
+      const html = response.data;
+      const patterns = [
+        /"statusStr"\s*:\s*"LIVE_STATUS_STREAMING"/.test(html),
+        /"isLiveStreaming"\s*:\s*true/.test(html),
+        /"liveRoomInfo"/.test(html) && /"status"\s*:\s*2/.test(html),
+        /roomid[^"]*"[^"]{5,}/.test(html) && !/redirectUrl/.test(html),
+        /"liveUrl"/.test(html) && !/"liveUrl"\s*:\s*""/.test(html),
+      ];
+      const positiveSignals = patterns.filter(Boolean).length;
+      const isLive = positiveSignals >= 2;
+      const color = isLive ? '#FF0050' : '#95A5A6';
+      const statusText = isLive ? '🔴 EN LIVE ACTUELLEMENT' : '⚫ Pas en live';
+      const e = embed(color)
+        .setTitle(`TikTok Live — @${CONFIG.TIKTOK_USERNAME}`)
+        .setDescription(`**Statut :** ${statusText}`)
+        .addFields(
+          { name: 'Signaux détectés', value: `${positiveSignals}/5`, inline: true },
+          { name: 'Lien', value: `https://www.tiktok.com/@${CONFIG.TIKTOK_USERNAME}/live`, inline: false },
+        )
+        .setThumbnail(`https://unavatar.io/tiktok/${CONFIG.TIKTOK_USERNAME}`)
+        .setFooter({ text: `Vérifié manuellement par ${message.author.tag}` });
+      await statusMsg.edit({ embeds: [e] });
+    } catch (err) {
+      await statusMsg.edit({ embeds: [embed('#FF4444').setTitle('Erreur de vérification').setDescription(`Impossible de contacter TikTok : \`${err.message}\``)] });
+    }
+  },
+
+  // ── STATS @user ───────────────────────────────────────────────
+  '!stats': async (message) => {
+    const target = message.mentions.members.first() || message.member;
+    const userId = target.id;
+    const warns = warnsData[userId]?.length || 0;
+    const isJailed = !!jailsData[userId];
+    const isNpc = !!npcList[userId];
+    const isTf = !!tfList[userId];
+    const isBlacklisted = !!blacklistData[userId];
+    const ageDays = Math.floor((Date.now() - (Number(BigInt(userId) >> 22n) + 1420070400000)) / 86400000);
+    const joinedTs = target.joinedAt ? `<t:${Math.floor(target.joinedAt.getTime() / 1000)}:D>` : 'Inconnu';
+    const createdTs = `<t:${Math.floor((Number(BigInt(userId) >> 22n) + 1420070400000) / 1000)}:D>`;
+    const roles = target.roles.cache.filter(r => r.id !== message.guild.id).map(r => `<@&${r.id}>`).join(', ') || '*Aucun*';
+
+    const statusFlags = [];
+    if (isJailed)      statusFlags.push('🔒 En jail');
+    if (isNpc)         statusFlags.push('🤖 NPC actif');
+    if (isTf)          statusFlags.push('📛 TF actif');
+    if (isBlacklisted) statusFlags.push('🚫 Blacklisté');
+    if (isAdmin(userId)) statusFlags.push('⚡ Admin');
+    if (statusFlags.length === 0) statusFlags.push('✅ Normal');
+
+    const color = isJailed ? '#FF4444' : warns >= 2 ? '#FFA500' : '#5865F2';
+    await message.reply({ embeds: [embed(color)
+      .setTitle(`Profil — ${target.displayName}`)
+      .setThumbnail(target.user.displayAvatarURL({ size: 256 }))
+      .addFields(
+        { name: '👤 Identité',       value: `${target.user.tag}\nID : \`${userId}\``,             inline: true  },
+        { name: '📅 Arrivée',        value: `Serveur : ${joinedTs}\nCompte : ${createdTs}`,        inline: true  },
+        { name: '⚠️ Warns',          value: `**${warns}/3**`,                                      inline: true  },
+        { name: '🚨 Statut actuel',  value: statusFlags.join('\n'),                                inline: true  },
+        { name: `🎭 Rôles (${target.roles.cache.size - 1})`, value: roles.slice(0, 1024),          inline: false },
+      )
+      .setFooter({ text: `Compte vieux de ${ageDays} jours` })
+    ] });
+  },
+
+  // ── SONDAGE ───────────────────────────────────────────────────
+  '!sondage': async (message, args) => {
+    const parts = args.join(' ').split('|').map(s => s.trim()).filter(Boolean);
+    if (parts.length < 3) return message.reply('Format : `!sondage <question> | <option1> | <option2> | [option3] | [option4]`\nMinimum 2 options, maximum 4.');
+    const [question, ...options] = parts;
+    if (options.length > 4) return message.reply('Maximum 4 options.');
+
+    const emojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣'];
+    const votes = options.map(() => 0);
+    const voters = {};
+
+    const buildEmbed = (voteData) => {
+      const total = voteData.reduce((a, b) => a + b, 0);
+      const fields = options.map((opt, i) => {
+        const pct = total > 0 ? Math.round(voteData[i] / total * 100) : 0;
+        const bar = '█'.repeat(Math.floor(pct / 10)) + '░'.repeat(10 - Math.floor(pct / 10));
+        return { name: `${emojis[i]} ${opt}`, value: `${bar} **${pct}%** (${voteData[i]} vote${voteData[i] !== 1 ? 's' : ''})`, inline: false };
+      });
+      return embed('#5865F2')
+        .setTitle(`📊 ${question}`)
+        .addFields(fields)
+        .setFooter({ text: `${total} vote${total !== 1 ? 's' : ''} · Sondage lancé par ${message.author.tag}` });
+    };
+
+    const row = new ActionRowBuilder().addComponents(
+      options.map((opt, i) =>
+        new ButtonBuilder()
+          .setCustomId(`sondage_${i}`)
+          .setLabel(`${emojis[i]} ${opt.slice(0, 50)}`)
+          .setStyle(ButtonStyle.Primary)
+      )
+    );
+
+    try { await message.delete(); } catch {}
+    const sondageMsg = await message.channel.send({ embeds: [buildEmbed(votes)], components: [row] });
+    activeSondages[sondageMsg.id] = { question, options, votes, voters, buildEmbed, authorTag: message.author.tag };
+  },
+
+  // ── UNJAIL @user ──────────────────────────────────────────────
+  '!unjail': async (message) => {
+    if (!isAdmin(message.author.id)) return message.reply('Permission refusée.');
+    const target = message.mentions.members.first();
+    if (!target) return message.reply('Mentionne un utilisateur : `!unjail @user`');
+
+    const jailData = jailsData[target.id];
+    if (!jailData) return message.reply(`<@${target.id}> n'est pas en jail actuellement.`);
+
+    try {
+      const savedRoleIds = jailData.savedRoleIds || [];
+      await unjailMember(target, savedRoleIds, `Liberation manuelle par ${message.author.tag}`);
+      delete jailsData[target.id]; saveJails();
+
+      const prisonChannel = message.guild.channels.cache.get(CONFIG.JAIL_PRISON_CHANNEL_ID);
+      if (prisonChannel) {
+        await prisonChannel.send({ embeds: [embed('#00FF66').setTitle('Libéré !').setDescription(`<@${target.id}> a été libéré manuellement par <@${message.author.id}>. Ses rôles ont été restaurés.`)] });
+      }
+      await message.reply({ embeds: [embed('#00FF66')
+        .setTitle('Jail levé')
+        .setDescription(`<@${target.id}> a été libéré avant la fin de sa peine.`)
+        .addFields(
+          { name: 'Libéré par',    value: `<@${message.author.id}>`,   inline: true },
+          { name: 'Rôles rendus',  value: `${savedRoleIds.length}`,    inline: true },
+        )
+      ] });
+      await logSanction(message.guild, [
+        { name: 'Membre',    value: `<@${target.id}>`,          inline: true },
+        { name: 'Par',       value: `<@${message.author.id}>`,  inline: true },
+        { name: 'Motif',     value: 'Liberation manuelle',      inline: false },
+      ], `Unjail — ${target.user.tag}`, '#00FF66');
+    } catch (err) {
+      await message.reply(`Erreur lors de la libération : ${err.message}`);
+    }
+  },
+
+  // ── SET-COPE-BULK ─────────────────────────────────────────────
+  '!set-cope-bulk': async (message, args) => {
+    if (!isAdmin(message.author.id)) return message.reply('Permission refusée.');
+    // Format : !set-cope-bulk cope | item1, item2, item3
+    //      ou  !set-cope-bulk interesting | item1, item2
+    const joined = args.join(' ');
+    const pipeIdx = joined.indexOf('|');
+    if (pipeIdx === -1) return message.reply('Format : `!set-cope-bulk <cope|interesting> | item1, item2, item3`');
+
+    const type  = joined.slice(0, pipeIdx).trim().toLowerCase();
+    const items = joined.slice(pipeIdx + 1).split(',').map(s => s.trim()).filter(Boolean);
+
+    if (!['cope', 'interesting'].includes(type)) return message.reply('Type invalide. Utilise `cope` ou `interesting`.');
+    if (items.length === 0) return message.reply('Aucun élément fourni après le `|`.');
+
+    const list = copesData[type];
+    let added = 0; const skipped = [];
+    for (const item of items) {
+      if (list.includes(item)) { skipped.push(item); continue; }
+      list.push(item); added++;
+    }
+    saveJSON(FILES.copes, copesData);
+
+    await message.reply({ embeds: [embed('#00FF66')
+      .setTitle(`Import en masse — ${type === 'cope' ? 'COPE' : 'Intéressants'}`)
+      .addFields(
+        { name: '✅ Ajoutés',  value: `${added} élément(s)`,                                      inline: true },
+        { name: '⏭️ Ignorés', value: `${skipped.length} (déjà présents)`,                         inline: true },
+        { name: 'Total liste', value: `${list.length} élément(s)`,                                 inline: true },
+        { name: 'Éléments ajoutés', value: items.filter(i => !skipped.includes(i)).map(i => `• ${i}`).join('\n').slice(0, 1024) || '*Aucun*', inline: false },
+      )
+    ] });
+  },
+
+  // ── MUTE @user <durée en minutes> ────────────────────────────
+  '!mute': async (message, args) => {
+    if (!isAdmin(message.author.id)) return message.reply('Permission refusée.');
+    const target = message.mentions.members.first();
+    if (!target) return message.reply('Format : `!mute @user <durée en minutes> [raison]`');
+    if (isAdmin(target.id)) return message.reply('Tu ne peux pas muter un admin.');
+
+    const durationMin = parseInt(args[1]);
+    if (isNaN(durationMin) || durationMin < 1 || durationMin > 40320) {
+      return message.reply('Durée invalide. Indique un nombre de minutes entre 1 et 40320 (28 jours max).');
+    }
+    const reason = args.slice(2).join(' ') || 'Aucune raison fournie';
+    const durationMs = durationMin * 60 * 1000;
+
+    try {
+      await target.timeout(durationMs, `${message.author.tag} : ${reason}`);
+      await message.reply({ embeds: [embed('#FFA500')
+        .setTitle('Membre muté')
+        .setDescription(`<@${target.id}> a été mis en timeout.`)
+        .addFields(
+          { name: 'Durée',  value: `${durationMin} minute${durationMin > 1 ? 's' : ''}`, inline: true },
+          { name: 'Par',    value: `<@${message.author.id}>`,                             inline: true },
+          { name: 'Raison', value: reason,                                                inline: false },
+        )
+        .setFooter({ text: `Levée automatique dans ${durationMin} min` })
+      ] });
+      await logSanction(message.guild, [
+        { name: 'Membre', value: `<@${target.id}>`,          inline: true },
+        { name: 'Par',    value: `<@${message.author.id}>`,  inline: true },
+        { name: 'Durée',  value: `${durationMin} min`,        inline: true },
+        { name: 'Raison', value: reason,                      inline: false },
+      ], `Mute — ${target.user.tag}`, '#FFA500');
+    } catch (err) {
+      await message.reply(`Impossible de muter : ${err.message}`);
+    }
+  },
+
+  // ── LIKE-ENABLE / LIKE-DISABLE ────────────────────────────────
+  '!like-enable': async (message) => {
+    if (!isAdmin(message.author.id)) return message.reply('Permission refusée.');
+    likeEnabled = true;
+    await message.reply({ embeds: [embed('#FFD700')
+      .setTitle('Like auto — Activé ✅')
+      .setDescription(`Le bot va maintenant liker **automatiquement** tous les messages de <@${LIKE_TARGET_USER_ID}>.`)
+      .setFooter({ text: `Activé par ${message.author.tag} · !like-disable pour arrêter` })
+    ] });
+  },
+
+  '!like-disable': async (message) => {
+    if (!isAdmin(message.author.id)) return message.reply('Permission refusée.');
+    likeEnabled = false;
+    await message.reply({ embeds: [embed('#95A5A6')
+      .setTitle('Like auto — Désactivé ⛔')
+      .setDescription(`Le bot ne like plus les messages de <@${LIKE_TARGET_USER_ID}>.`)
+      .setFooter({ text: `Désactivé par ${message.author.tag}` })
+    ] });
+  },
+
   // ── CLEARROLE ────────────────────────────────────────────────
   '!clearrole': async (message) => {
     if (!isAdmin(message.author.id)) return message.reply('Permission refusée.');
@@ -2079,6 +2331,30 @@ async function advanceTournament(tournamentId, channel) {
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isButton()) return;
   const customId = interaction.customId;
+
+  // ── Boutons de SONDAGE ─────────────────────────────────────
+  if (customId.startsWith('sondage_')) {
+    const optionIndex = parseInt(customId.split('_')[1]);
+    const sondage = activeSondages[interaction.message.id];
+
+    if (!sondage) {
+      return interaction.reply({ content: 'Ce sondage n\'est plus actif ou a expiré.', ephemeral: true });
+    }
+
+    const userId = interaction.user.id;
+    const previousVote = sondage.voters[userId];
+
+    if (previousVote !== undefined) {
+      // Changer de vote
+      sondage.votes[previousVote]--;
+    }
+    sondage.votes[optionIndex]++;
+    sondage.voters[userId] = optionIndex;
+
+    const newEmbed = sondage.buildEmbed(sondage.votes);
+    await interaction.update({ embeds: [newEmbed] });
+    return;
+  }
 
   // ── Boutons de VÉRIFICATION ────────────────────────────────
   if (customId.startsWith('verif_')) {
@@ -2374,6 +2650,12 @@ client.on('interactionCreate', async (interaction) => {
 
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
+
+  // ── LIKE AUTO ───────────────────────────────────────────────
+  if (likeEnabled && message.author.id === LIKE_TARGET_USER_ID) {
+    try { await message.react('❤️'); } catch (err) { console.warn('[LIKE AUTO] Impossible de réagir :', err.message); }
+  }
+
   if (!message.content.startsWith(CONFIG.PREFIX)) return;
 
   const [rawCmd, ...args] = message.content.trim().split(/\s+/);
