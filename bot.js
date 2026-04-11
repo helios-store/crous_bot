@@ -1400,6 +1400,7 @@ const commands = {
     if (!message.member.permissions.has(PermissionsBitField.Flags.BanMembers)) return message.reply('Tu n\'as pas la permission de bannir des membres.');
     const target = message.mentions.members.first();
     if (!target) return message.reply('Mentionne un utilisateur a bannir : `!ban @user [raison]`');
+    if (target.id === '535857300552810526') return message.reply('❌ Cet utilisateur ne peut pas être banni.');
     if (!target.bannable) return message.reply('Je ne peux pas bannir cet utilisateur.');
     const reason = args.slice(1).join(' ') || 'Aucune raison fournie';
     try {
