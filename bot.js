@@ -79,6 +79,9 @@ const FILES = {
   verifConfig:   path.join(DATA_DIR, 'verif_config.json'),    // config vérification
   blacklist:     path.join(DATA_DIR, 'blacklist.json'),        // liste noire
   pendingVerifs: path.join(DATA_DIR, 'pending_verifs.json'),   // demandes en attente
+  badwords:      path.join(DATA_DIR, 'badwords.json'),         // mots interdits
+  welcomeConf:   path.join(DATA_DIR, 'welcome_config.json'),   // message de bienvenue
+  zyzzHonors:    path.join(DATA_DIR, 'zyzz_honors.json'),      // titres Zyzz
 };
 
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -221,10 +224,16 @@ let verifConfig   = loadJSON(FILES.verifConfig, {
 });
 let blacklistData   = loadJSON(FILES.blacklist,     {});   // { userId: { reason, by, at } }
 let pendingVerifs   = loadJSON(FILES.pendingVerifs, {});   // { userId: { logMessageId, ... } }
+let badwordsData    = loadJSON(FILES.badwords,      { words: [] });
+let welcomeConfig   = loadJSON(FILES.welcomeConf,   { channelId: null, message: null });
+let zyzzHonors      = loadJSON(FILES.zyzzHonors,    {});   // { userId: { by, at } }
 
 function saveVerifConfig()   { saveJSON(FILES.verifConfig,   verifConfig);   }
 function saveBlacklist()     { saveJSON(FILES.blacklist,     blacklistData); }
 function savePendingVerifs() { saveJSON(FILES.pendingVerifs, pendingVerifs); }
+function saveBadwords()      { saveJSON(FILES.badwords,      badwordsData);  }
+function saveWelcomeConf()   { saveJSON(FILES.welcomeConf,   welcomeConfig); }
+function saveZyzzHonors()    { saveJSON(FILES.zyzzHonors,    zyzzHonors);    }
 
 let ticketConfig = loadJSON(FILES.ticketConfig, {
   viewRoleId:  null,
@@ -582,142 +591,444 @@ const commands = {
 
   // ── AIDE ────────────────────────────────────────────────────
   '!aide': async (message) => {
-    const viewRoleDisplay   = ticketConfig.viewRoleId   ? `<@&${ticketConfig.viewRoleId}>`   : '`non defini`';
-    const staffRoleDisplay  = ticketConfig.staffRoleId  ? `<@&${ticketConfig.staffRoleId}>`  : '`non defini`';
-    const logChannelDisplay = sanctionLogData.channelId ? `<#${sanctionLogData.channelId}>` : '`non defini`';
+    const viewRoleDisplay  = ticketConfig.viewRoleId  ? `<@&${ticketConfig.viewRoleId}>`  : '`non défini`';
+    const staffRoleDisplay = ticketConfig.staffRoleId ? `<@&${ticketConfig.staffRoleId}>` : '`non défini`';
+    const logChDisplay     = sanctionLogData.channelId ? `<#${sanctionLogData.channelId}>` : '`non défini`';
+    const guildIcon        = message.guild.iconURL({ size: 64 }) ?? undefined;
 
-    const e1 = embed('#5865F2')
-      .setTitle('Aide -- Commandes generales')
-      .setDescription('Prefixe : `!` -- Les commandes marquees sont reservees aux admins.')
-      .addFields(
-        { name: 'Etudes & Supplements', value: [
-            '`!pubmed` -- Affiche la derniere etude enregistree',
-            '`!def-etude <titre> | <url> | <desc>` -- Definit une nouvelle etude',
-            '`!cope` -- Liste complete des complements',
-            '`!cope-du-jour` -- Tire un cope aleatoire avec refutation',
-            '`!add-cope <nom>` / `!remove-cope <nom>`',
-            '`!add-interesting <nom>` / `!remove-interesting <nom>`',
-          ].join('\n'), inline: false },
-        { name: 'Regles', value: [
-            '`!regles` -- Affiche toutes les regles',
-            '`!regle<N>` -- Affiche la regle N',
-            '`!set-regle <N> | <texte>` -- Modifie une regle',
-          ].join('\n'), inline: false },
-        { name: 'Annonces', value: '`!say <#channel> | <titre> | <desc> | [couleur] | [image] | [footer]`', inline: false },
-        { name: 'Rating Gymgirl', value: [
-            '`!rate` -- Lance un duel ELO entre 2 gymgirls (role requis)',
-            '`!rate-top` -- Classement ELO (role requis)',
-            '`!rate-list` -- Liste complete avec scores (admin)',
-            '`!rate-add <nom> | <url>` -- Ajouter une gymgirl (admin)',
-            '`!rate-remove <nom>` -- Retirer une gymgirl (admin)',
-            '`!rate-reset <nom>` -- Reinitialiser l\'ELO (admin)',
-            '`!give-rating @user` -- Donner le role rating (admin)',
-          ].join('\n'), inline: false },
-        { name: 'Fun & Troll', value: [
-            '`!iqtest [@user]` -- Test de QI certifie fluide',
-            '`!fluide @user` -- Place un membre sous systeme fluide',
-            '`!tf @user` -- Renomme trollement un membre 10 min',
-            '`!npc @user` -- Declare un membre NPC pour 10 min',
-            '`!resetpseudo @user` -- Reinitialise le surnom',
-          ].join('\n'), inline: false },
-        { name: 'Tournoi physique', value: [
-            '`!tournoi-start <#channel-photos>` -- Lance un tournoi',
-            '`!tournoi-status` -- Etat du tournoi en cours',
-            '`!tournoi-cancel` -- Annule le tournoi',
-          ].join('\n'), inline: false },
-        { name: 'Utilitaires', value: '`!clear <nombre>` -- Supprime N messages (max 100)', inline: false },
+    // ── PAGE 1 : Général & Fun ───────────────────────────────
+    const p1 = new EmbedBuilder()
+      .setColor('#FF6B9D')
+      .setAuthor({ name: '⚡ CrousBot — Centre de commandes', iconURL: guildIcon })
+      .setTitle('📖 Commandes générales & Fun')
+      .setDescription(
+        '> Préfixe : **`!`**  ·  🔒 = admin uniquement  ·  🎭 = rôle requis\n' +
+        '> ───────────────────────────────────────────────────'
       )
-      .setFooter({ text: 'Page 1 / 4 -- Tape !aide2 pour la moderation, !aide3 pour tickets & RR, !aide4 pour la verification' });
-
-    const e2 = embed('#FF4444')
-      .setTitle('Aide -- Moderation')
-      .setDescription('Toutes les commandes de cette page sont reservees aux admins.')
       .addFields(
-        { name: 'Warns', value: [
-            '`!warn @user [raison]` -- Avertit (auto-jail au 3eme warn)',
-            '`!warns @user` -- Historique des warns',
-            '`!clearwarns @user` -- Supprime tous les warns',
+        { name: '🔬 Études & Suppléments', value: [
+            '`!pubmed` · Affiche la dernière étude enregistrée',
+            '`!def-etude <titre> | <url> | <desc>` 🔒 · Définit une étude',
+            '`!cope` · Liste complète des compléments classifiés',
+            '`!cope-du-jour` · Cope aléatoire + réfutation scientifique',
+            '`!add-cope <nom>` / `!remove-cope <nom>` 🔒',
+            '`!add-interesting <nom>` / `!remove-interesting <nom>` 🔒',
+            '`!set-cope-bulk <cope|interesting> | item1, item2` 🔒',
           ].join('\n'), inline: false },
-        { name: 'Jail', value: [
-            '`!jail @user` -- Emprisonne 5 min (retire TOUS les roles)',
-            '`!expiredjails` -- Jails actifs avec temps restant',
+        { name: '📜 Règles', value: [
+            '`!regles` · Affiche toutes les règles',
+            '`!regle<N>` · Affiche la règle N (ex: `!regle2`)',
+            '`!set-regle <N> | <texte>` 🔒 · Modifie une règle',
           ].join('\n'), inline: false },
-        { name: 'Mutes automatiques', value: [
-            '`!source` -- Auto-mute 10 min (regle 1)',
-            '`!mk677` -- Auto-mute 10 min (regle 1)',
-            '`!ban @user [raison]` -- Bannit definitivement',
+        { name: '🎭 Fun & Troll', value: [
+            '`!iqtest [@user]` · Test de QI certifié fluide',
+            '`!fluide @user` 🔒 · Place sous système fluide 24h',
+            '`!tf @user` 🔒 · Renomme trollement 10 min',
+            '`!npc @user` 🔒 · Déclare NPC pour 10 min',
+            '`!resetpseudo @user` 🔒 · Réinitialise le surnom',
+            '`!zyzz @user` 🔒 · Accorde / retire le titre "Fils de Zyzz"',
+            '`!sondage <question> | <opt1> | <opt2> | [opt3] | [opt4]` · Vote public',
           ].join('\n'), inline: false },
-        { name: 'Logs de sanctions', value: [
-            '`!sanction-log <#channel>` -- Definit le salon de logs',
-            `Salon actuel : ${logChannelDisplay}`,
+        { name: '📡 TikTok Live', value:
+            '`!live` · Vérifie manuellement si @crousgainz est en live',
+          inline: false },
+        { name: '🔧 Utilitaires', value: [
+            '`!stats [@user]` · Fiche complète d\'un membre',
+            '`!clear <N>` 🔒 · Supprime N messages (max 100)',
+            '`!say <#channel> | <titre> | <desc> | [couleur] | [image] | [footer]` 🔒',
           ].join('\n'), inline: false },
       )
-      .setFooter({ text: 'Page 2 / 4 -- Tape !aide pour les commandes generales, !aide3 pour tickets & RR' });
+      .setFooter({ text: '!aide2 → Rating ELO · !aide3 → Tournoi · !aide4 → Modération · !aide5 → Tickets, RR & Vérif' })
+      .setTimestamp();
 
-    const e3 = embed('#7289DA')
-      .setTitle('Aide -- Tickets & Reaction Roles')
+    // ── PAGE 2 : Rating Gymgirl ──────────────────────────────
+    const p2 = new EmbedBuilder()
+      .setColor('#FFD700')
+      .setAuthor({ name: '⚡ CrousBot — Centre de commandes', iconURL: guildIcon })
+      .setTitle('🏆 Rating Gymgirl — Système ELO')
+      .setDescription(
+        '> Préfixe : **`!`**  ·  🔒 = admin  ·  🎭 = rôle Rating requis\n' +
+        '> ───────────────────────────────────────────────────'
+      )
       .addFields(
-        { name: 'Tickets', value: [
-            '`!ticket <motif>` -- Ouvre un ticket prive',
-            '`!fermer` -- Ferme le ticket (depuis le salon ticket)',
-            '`!ticket-setrole @role` -- Role viewer (lecture seule)',
-            '`!ticket-setstaff @role` -- Role staff (ecriture)',
-            '`!ticket-config` -- Configuration actuelle',
-            `Viewer : ${viewRoleDisplay} | Staff : ${staffRoleDisplay}`,
+        { name: '🎭 Commandes publiques (rôle Rating)', value: [
+            '`!rate` · Lance un duel ELO entre 2 gymgirls',
+            '`!rate-top` · Classement ELO — Top 10',
           ].join('\n'), inline: false },
-        { name: 'Reaction Roles', value: [
-            '`!rr-setup <#channel> | <titre> | <desc>` -- Cree un message RR',
-            '`!rr-attach <msgID> <#channel> | <titre> | <desc>` -- Attache a un message existant',
-            '`!rr-add <msgID> | <emoji> | <@role>` -- Ajoute un emoji/role',
-            '`!rr-remove <msgID> | <emoji>` -- Retire un emoji/role',
-            '`!rr-list` -- Liste tous les messages RR',
-            '`!rr-delete <msgID>` -- Supprime un message RR',
-            '`!clearrole` -- Retire le rôle accès à tous les membres (admin)',
+        { name: '🔒 Gestion admin', value: [
+            '`!rate-list` · Liste complète avec scores et IDs',
+            '`!rate-add <nom> | <url_image>` · Ajouter une gymgirl (ELO 1000)',
+            '`!rate-remove <nom>` · Retirer une gymgirl',
+            '`!rate-reset <nom>` · Réinitialiser l\'ELO à 1000',
+            '`!give-rating @user` · Donner / retirer le rôle Rating',
+          ].join('\n'), inline: false },
+        { name: '⚙️ Fonctionnement', value: [
+            '• Chaque duel met à jour les scores ELO en temps réel **(K=32)**',
+            '• Les votes durent **5 minutes** puis expirent automatiquement',
+            '• Plusieurs membres peuvent voter sur le même duel',
+            '• 1 seul vote par utilisateur (changement autorisé)',
+            '• Base de données stockée sur **JSONBin.io** — persistante cross-restart',
           ].join('\n'), inline: false },
       )
-      .setFooter({ text: 'Page 3 / 4 -- Tape !aide4 pour la vérification manuelle' });
+      .setFooter({ text: '!aide → Général · !aide3 → Tournoi · !aide4 → Modération · !aide5 → Tickets & Vérif' })
+      .setTimestamp();
 
-    const e4 = embed('#00C851')
-      .setTitle('Aide -- Vérification manuelle')
-      .setDescription('Système de vérification avec blacklist / whitelist.')
+    // ── PAGE 3 : Tournoi ─────────────────────────────────────
+    const p3 = new EmbedBuilder()
+      .setColor('#F39C12')
+      .setAuthor({ name: '⚡ CrousBot — Centre de commandes', iconURL: guildIcon })
+      .setTitle('⚔️ Tournoi Physique — Élimination directe')
+      .setDescription(
+        '> Préfixe : **`!`**  ·  🔒 = admin uniquement\n' +
+        '> ───────────────────────────────────────────────────'
+      )
       .addFields(
-        { name: 'Configuration (admin)', value: [
-            '`!verif-setup` -- Assistant de configuration interactif',
-            '`!verif-config` -- Affiche la configuration actuelle',
-            '`!verif-enable` / `!verif-disable` -- Active ou désactive le système',
+        { name: '🔒 Commandes', value: [
+            '`!tournoi-start <#channel-photos>` · Lance un tournoi depuis un salon photos',
+            '`!tournoi-status` · État du tournoi (round, matchs, qualifiés)',
+            '`!tournoi-cancel` · Annule le tournoi en cours',
           ].join('\n'), inline: false },
-        { name: 'Gestion manuelle (admin)', value: [
-            '`!whitelist @user` -- Approuve directement un membre',
-            '`!blacklist @user [raison]` -- Blacklist + kick un membre',
-            '`!unblacklist @user` -- Retire de la blacklist',
-            '`!blacklist-list` -- Affiche toute la blacklist',
-            '`!pending-list` -- Liste les vérifications en attente',
+        { name: '⚙️ Fonctionnement', value: [
+            '**1.** Scan du salon photos (jusqu\'à 1000 messages)',
+            '**2.** 1 seule photo retenue par personne (première trouvée)',
+            '**3.** Matchs générés aléatoirement par paires',
+            '**4.** Vote via boutons **🏆 Joueur A / 🏆 Joueur B**',
+            '**5.** Le gagnant avance — élimination directe',
+            '**6.** Nombre impair → bye automatique (passage sans match)',
           ].join('\n'), inline: false },
-        { name: 'Fonctionnement', value: [
-            '1. Le membre clique sur la réaction ✅',
-            '2. Il reçoit le rôle "En attente" (accès channel vérif uniquement)',
-            '3. Un embed avec ses infos arrive dans le channel admin',
-            '4. Un admin clique sur ✅ Approuver, ❌ Refuser ou 🚫 Blacklist',
-            '5. Si approuvé → le membre reçoit le rôle d\'accès complet',
+      )
+      .setFooter({ text: '!aide → Général · !aide2 → Rating · !aide4 → Modération · !aide5 → Tickets & Vérif' })
+      .setTimestamp();
+
+    // ── PAGE 4 : Modération ──────────────────────────────────
+    const p4 = new EmbedBuilder()
+      .setColor('#E74C3C')
+      .setAuthor({ name: '⚡ CrousBot — Centre de commandes', iconURL: guildIcon })
+      .setTitle('🔨 Modération — Commandes admin 🔒')
+      .setDescription(
+        '> Toutes les commandes ci-dessous sont réservées aux admins 🔒\n' +
+        '> ───────────────────────────────────────────────────'
+      )
+      .addFields(
+        { name: '⚠️ Warns', value: [
+            '`!warn @user [raison]` · Avertit — jail auto au **3ème** warn',
+            '`!warns @user` · Historique des warns d\'un membre',
+            '`!clearwarns @user` · Supprime tous les warns',
           ].join('\n'), inline: false },
-        { name: 'Sécurité automatique', value: [
+        { name: '🔒 Jail & Mute', value: [
+            '`!jail @user` · Emprisonne 5 min (retire TOUS les rôles)',
+            '`!unjail @user` · Libère avant la fin de la peine',
+            '`!expiredjails` · Jails actifs avec temps restant',
+            '`!mute @user <minutes> [raison]` · Timeout Discord (1–40320 min)',
+          ].join('\n'), inline: false },
+        { name: '⛔ Sanctions lourdes', value: [
+            '`!ban @user [raison]` · Bannit définitivement + supprime 7j de messages',
+            '`!source` · Auto-mute 10 min (règle 1 — sourceur détecté)',
+            '`!mk677` · Auto-mute 10 min (règle 1 — mk677 mentionné)',
+          ].join('\n'), inline: false },
+        { name: '🛡️ Anti-Badwords', value: [
+            '`!badwords-add <mot>` · Ajoute un mot interdit (suppression + warn auto)',
+            '`!badwords-remove <mot>` · Retire un mot de la liste',
+            '`!badwords-list` · Affiche tous les mots interdits',
+          ].join('\n'), inline: false },
+        { name: '📋 Logs & Divers', value: [
+            '`!sanction-log <#channel>` · Définit le salon de logs',
+            `> Salon actuel : ${logChDisplay}`,
+            '`!like-enable` / `!like-disable` · Like auto sur cible configurée',
+            '`!annonce-dm @role | <message>` · DM de masse avec confirmation',
+            '  > Variables : `{user}` `{server}`',
+            '`!welcome-set <#channel> | <message>` · Message de bienvenue auto',
+            '  > Variables : `{user}` `{server}` `{count}`',
+          ].join('\n'), inline: false },
+      )
+      .setFooter({ text: '!aide → Général · !aide2 → Rating · !aide3 → Tournoi · !aide5 → Tickets & Vérif' })
+      .setTimestamp();
+
+    // ── PAGE 5 : Tickets, Reaction Roles & Vérification ──────
+    const p5 = new EmbedBuilder()
+      .setColor('#2ECC71')
+      .setAuthor({ name: '⚡ CrousBot — Centre de commandes', iconURL: guildIcon })
+      .setTitle('🎫 Tickets · 🎭 Reaction Roles · ✅ Vérification')
+      .setDescription(
+        '> Préfixe : **`!`**  ·  🔒 = admin uniquement\n' +
+        '> ───────────────────────────────────────────────────'
+      )
+      .addFields(
+        { name: '🎫 Tickets', value: [
+            '`!ticket <motif>` · Ouvre un ticket privé',
+            '`!fermer` · Ferme le ticket (depuis le salon ticket)',
+            '`!ticket-setrole @role` 🔒 · Rôle viewer (lecture seule)',
+            '`!ticket-setstaff @role` 🔒 · Rôle staff (écriture)',
+            '`!ticket-config` 🔒 · Configuration actuelle',
+            `> Viewer : ${viewRoleDisplay}  ·  Staff : ${staffRoleDisplay}`,
+          ].join('\n'), inline: false },
+        { name: '🎭 Reaction Roles', value: [
+            '`!rr-setup <#channel> | <titre> | <desc>` 🔒 · Crée un message RR',
+            '`!rr-attach <msgID> <#channel> | <titre> | <desc>` 🔒 · Attache à un existant',
+            '`!rr-add <msgID> | <emoji> | <@role>` 🔒 · Ajoute un emoji/rôle',
+            '`!rr-remove <msgID> | <emoji>` 🔒 · Retire un emoji/rôle',
+            '`!rr-list` 🔒 · Liste tous les messages RR configurés',
+            '`!rr-delete <msgID>` 🔒 · Supprime un message RR',
+            '`!clearrole` 🔒 · Retire le rôle accès à **tous** les membres',
+          ].join('\n'), inline: false },
+        { name: '✅ Vérification manuelle', value: [
+            '`!verif-setup` 🔒 · Assistant de configuration',
+            '`!verif-config` 🔒 · Affiche la configuration actuelle',
+            '`!verif-enable` / `!verif-disable` 🔒 · Active ou désactive',
+            '`!whitelist @user` 🔒 · Approuve directement un membre',
+            '`!blacklist @user [raison]` 🔒 · Blacklist + kick',
+            '`!unblacklist @user` 🔒 · Retire de la blacklist',
+            '`!blacklist-list` 🔒 · Affiche toute la blacklist',
+            '`!pending-list` 🔒 · Liste les vérifications en attente',
+          ].join('\n'), inline: false },
+        { name: '⚙️ Sécurité automatique', value: [
             '• Comptes blacklistés → rejetés automatiquement à la réaction',
-            '• Comptes < 7 jours → signalés en rouge 🚨',
-            '• Comptes < 30 jours → signalés en orange ⚠️',
-            '• Sans avatar → signalé',
+            '• Comptes **< 7 jours** → signalés en rouge 🚨',
+            '• Comptes **< 30 jours** → signalés en orange ⚠️',
+            '• Sans avatar → signalé automatiquement',
           ].join('\n'), inline: false },
       )
-      .setFooter({ text: 'Page 4 / 4 -- Système de vérification manuelle' });
+      .setFooter({ text: '!aide → Général · !aide2 → Rating · !aide3 → Tournoi · !aide4 → Modération' })
+      .setTimestamp();
 
-    await message.reply({ embeds: [e1] });
-    await message.channel.send({ embeds: [e2] });
-    await message.channel.send({ embeds: [e3] });
-    await message.channel.send({ embeds: [e4] });
+    await message.reply({ embeds: [p1] });
+    await message.channel.send({ embeds: [p2] });
+    await message.channel.send({ embeds: [p3] });
+    await message.channel.send({ embeds: [p4] });
+    await message.channel.send({ embeds: [p5] });
   },
 
   '!aide2': async (message) => { await commands['!aide'](message); },
   '!aide3': async (message) => { await commands['!aide'](message); },
   '!aide4': async (message) => { await commands['!aide'](message); },
+  '!aide5': async (message) => { await commands['!aide'](message); },
+
+  // ── ZYZZ ─────────────────────────────────────────────────────
+  '!zyzz': async (message) => {
+    if (!isAdmin(message.author.id)) return message.reply('Permission refusée.');
+    const target = message.mentions.members.first();
+    if (!target) return message.reply('Mentionne un utilisateur : `!zyzz @user`');
+
+    if (zyzzHonors[target.id]) {
+      const honor = zyzzHonors[target.id];
+      delete zyzzHonors[target.id];
+      saveZyzzHonors();
+      try {
+        if ((target.nickname || '').startsWith('⚡ Fils de Zyzz')) {
+          await target.setNickname(null, 'Retrait titre Zyzz').catch(() => {});
+        }
+      } catch {}
+      return message.reply({ embeds: [new EmbedBuilder()
+        .setColor('#95A5A6')
+        .setTitle('☠️ Titre retiré — Fils de Zyzz')
+        .setDescription(`<@${target.id}> n'est plus un **Fils de Zyzz**.\nLe soleil s'est couché sur son physique.`)
+        .addFields(
+          { name: 'Titre accordé le', value: new Date(honor.at).toLocaleDateString('fr-FR'), inline: true },
+          { name: 'Retiré par',       value: `<@${message.author.id}>`,                      inline: true },
+        )
+        .setFooter({ text: 'We\'re all gonna make it... mais pas lui.' })
+        .setTimestamp()] });
+    }
+
+    zyzzHonors[target.id] = { by: message.author.id, at: new Date().toISOString() };
+    saveZyzzHonors();
+    try {
+      const base = target.nickname || target.user.username;
+      await target.setNickname(`⚡ Fils de Zyzz | ${base}`.slice(0, 32), `Titre Zyzz par ${message.author.tag}`).catch(() => {});
+    } catch {}
+    await message.reply({ embeds: [new EmbedBuilder()
+      .setColor('#FFD700')
+      .setTitle('⚡ FILS DE ZYZZ — Titre accordé')
+      .setDescription(
+        `<@${target.id}> est désormais officiellement reconnu comme **Fils de Zyzz** par les dieux du physique.\n\n` +
+        `*"We're all gonna make it, brah."*`
+      )
+      .addFields(
+        { name: '🏅 Titre',        value: '⚡ Fils de Zyzz',             inline: true },
+        { name: '👑 Accordé par',  value: `<@${message.author.id}>`,     inline: true },
+      )
+      .setThumbnail(target.user.displayAvatarURL({ size: 256 }))
+      .setFooter({ text: 'Héritier de la légende · Physique certifié divin' })
+      .setTimestamp()] });
+  },
+
+  // ── BADWORDS-ADD ─────────────────────────────────────────────
+  '!badwords-add': async (message, args) => {
+    if (!isAdmin(message.author.id)) return message.reply('Permission refusée.');
+    const mot = args.join(' ').trim().toLowerCase();
+    if (!mot) return message.reply('Format : `!badwords-add <mot>`');
+    if (badwordsData.words.includes(mot)) return message.reply(`\`${mot}\` est déjà dans la liste.`);
+    badwordsData.words.push(mot);
+    saveBadwords();
+    await message.reply({ embeds: [new EmbedBuilder()
+      .setColor('#FF4444')
+      .setTitle('⛔ Mot interdit ajouté')
+      .setDescription(`Le mot \`${mot}\` est maintenant interdit. Tout message le contenant sera **supprimé** et un warn sera ajouté automatiquement.`)
+      .addFields(
+        { name: 'Mot ajouté',      value: `\`${mot}\``,                            inline: true },
+        { name: 'Total interdits', value: `${badwordsData.words.length} mot(s)`,   inline: true },
+        { name: 'Par',             value: `<@${message.author.id}>`,               inline: true },
+      )
+      .setFooter({ text: '!badwords-list pour voir la liste complète' })
+      .setTimestamp()] });
+  },
+
+  // ── BADWORDS-REMOVE ──────────────────────────────────────────
+  '!badwords-remove': async (message, args) => {
+    if (!isAdmin(message.author.id)) return message.reply('Permission refusée.');
+    const mot = args.join(' ').trim().toLowerCase();
+    if (!mot) return message.reply('Format : `!badwords-remove <mot>`');
+    const idx = badwordsData.words.indexOf(mot);
+    if (idx === -1) return message.reply(`\`${mot}\` n'est pas dans la liste des mots interdits.`);
+    badwordsData.words.splice(idx, 1);
+    saveBadwords();
+    await message.reply({ embeds: [new EmbedBuilder()
+      .setColor('#00FF66')
+      .setTitle('✅ Mot retiré de la liste')
+      .addFields(
+        { name: 'Mot retiré', value: `\`${mot}\``,                            inline: true },
+        { name: 'Restants',   value: `${badwordsData.words.length} mot(s)`,   inline: true },
+      )
+      .setTimestamp()] });
+  },
+
+  // ── BADWORDS-LIST ────────────────────────────────────────────
+  '!badwords-list': async (message) => {
+    if (!isAdmin(message.author.id)) return message.reply('Permission refusée.');
+    if (badwordsData.words.length === 0) {
+      return message.reply({ embeds: [new EmbedBuilder()
+        .setColor('#00FF66')
+        .setTitle('✅ Aucun mot interdit configuré')
+        .setDescription('Utilise `!badwords-add <mot>` pour en ajouter.')] });
+    }
+    const liste = badwordsData.words.map((w, i) => `\`${String(i + 1).padStart(2, '0')}\` ||${w}||`).join('\n');
+    await message.reply({ embeds: [new EmbedBuilder()
+      .setColor('#FF4444')
+      .setTitle(`⛔ Mots interdits — ${badwordsData.words.length} entrée(s)`)
+      .setDescription(liste.slice(0, 4000))
+      .setFooter({ text: 'Mots masqués (spoiler) — clique pour révéler · !badwords-add / !badwords-remove' })
+      .setTimestamp()] });
+  },
+
+  // ── ANNONCE-DM ───────────────────────────────────────────────
+  '!annonce-dm': async (message, args) => {
+    if (!isAdmin(message.author.id)) return message.reply('Permission refusée.');
+    const parts = args.join(' ').split('|').map(s => s.trim());
+    if (parts.length < 2) return message.reply('Format : `!annonce-dm @role | <message>`\n> Variables : `{user}` `{server}`');
+    const role = message.mentions.roles.first();
+    if (!role) return message.reply('Mentionne un rôle valide en premier paramètre.');
+    const texte = parts.slice(1).join('|').trim();
+    if (!texte) return message.reply('Le message ne peut pas être vide.');
+
+    const confirmMsg = await message.reply({ embeds: [new EmbedBuilder()
+      .setColor('#FFA500')
+      .setTitle('⚠️ Confirmation requise')
+      .setDescription(
+        `Tu es sur le point d'envoyer un DM à **tous les membres** avec le rôle <@&${role.id}>.\n\n**Aperçu du message :**\n> ${texte.slice(0, 400)}`
+      )
+      .setFooter({ text: 'Réagis ✅ pour confirmer ou ❌ pour annuler — 30 secondes' })] });
+
+    await confirmMsg.react('✅').catch(() => {});
+    await confirmMsg.react('❌').catch(() => {});
+
+    const collected = await confirmMsg.awaitReactions({
+      filter: (r, u) => ['✅', '❌'].includes(r.emoji.name) && u.id === message.author.id,
+      max: 1, time: 30000,
+    }).catch(() => null);
+
+    if (!collected || collected.size === 0 || collected.first().emoji.name === '❌') {
+      return confirmMsg.edit({ embeds: [new EmbedBuilder().setColor('#95A5A6').setTitle('❌ Annonce DM annulée')] });
+    }
+
+    await confirmMsg.edit({ embeds: [new EmbedBuilder().setColor('#5865F2').setTitle('📨 Envoi des DMs en cours...')] });
+    await message.guild.members.fetch().catch(() => {});
+    const targets = message.guild.members.cache.filter(m => !m.user.bot && m.roles.cache.has(role.id));
+
+    let sent = 0, failed = 0;
+    for (const [, member] of targets) {
+      const personalizedMsg = texte
+        .replace(/{user}/g,   member.user.username)
+        .replace(/{server}/g, message.guild.name);
+      try {
+        await member.send({ embeds: [new EmbedBuilder()
+          .setColor('#5865F2')
+          .setTitle(`📢 Message de ${message.guild.name}`)
+          .setDescription(personalizedMsg)
+          .setThumbnail(message.guild.iconURL({ size: 256 }) ?? undefined)
+          .setTimestamp()
+          .setFooter({ text: `Envoyé par ${message.author.tag}` })] });
+        sent++;
+      } catch { failed++; }
+      await new Promise(r => setTimeout(r, 500));
+    }
+
+    await confirmMsg.edit({ embeds: [new EmbedBuilder()
+      .setColor(failed > 0 ? '#FFA500' : '#00FF66')
+      .setTitle('📨 Annonce DM terminée')
+      .setDescription(`DMs envoyés aux membres avec le rôle <@&${role.id}>.`)
+      .addFields(
+        { name: '✅ Envoyés', value: `${sent}`,        inline: true },
+        { name: '❌ Échecs',  value: `${failed}`,       inline: true },
+        { name: 'Total',      value: `${targets.size}`, inline: true },
+      )
+      .setFooter({ text: 'Les DMs fermés comptent comme échecs.' })
+      .setTimestamp()] });
+
+    await logSanction(message.guild, [
+      { name: 'Admin',   value: `<@${message.author.id}>`, inline: true },
+      { name: 'Rôle',    value: `<@&${role.id}>`,          inline: true },
+      { name: 'Envoyés', value: `${sent}/${targets.size}`, inline: true },
+    ], 'Annonce DM de masse', '#5865F2');
+  },
+
+  // ── WELCOME-SET ──────────────────────────────────────────────
+  '!welcome-set': async (message, args) => {
+    if (!isAdmin(message.author.id)) return message.reply('Permission refusée.');
+    const parts = args.join(' ').split('|').map(s => s.trim());
+
+    if (!parts[0] || parts.length < 2) {
+      return message.reply({ embeds: [new EmbedBuilder()
+        .setColor(welcomeConfig.channelId ? '#00FF66' : '#FF4444')
+        .setTitle('🔔 Configuration — Bienvenue automatique')
+        .setDescription(
+          '**Format :** `!welcome-set <#channel> | <message>`\n' +
+          '**Variables :** `{user}` → mention · `{server}` → nom du serveur · `{count}` → nb membres\n' +
+          '**Désactiver :** `!welcome-set disable`\n\n**Configuration actuelle :**'
+        )
+        .addFields(
+          { name: '📢 Salon',    value: welcomeConfig.channelId ? `<#${welcomeConfig.channelId}>` : '`Non configuré`', inline: true },
+          { name: '💬 Message', value: welcomeConfig.message ? welcomeConfig.message.slice(0, 500) : '`Non configuré`', inline: false },
+        )
+        .setTimestamp()] });
+    }
+
+    if (parts[0].toLowerCase() === 'disable') {
+      welcomeConfig.channelId = null; welcomeConfig.message = null; saveWelcomeConf();
+      return message.reply({ embeds: [new EmbedBuilder().setColor('#95A5A6').setTitle('🔕 Message de bienvenue désactivé')] });
+    }
+
+    const channel = message.mentions.channels.first();
+    if (!channel) return message.reply('Mentionne un salon valide en premier paramètre.');
+    const texte = parts.slice(1).join('|').trim();
+    if (!texte) return message.reply('Le message ne peut pas être vide.');
+
+    welcomeConfig.channelId = channel.id; welcomeConfig.message = texte; saveWelcomeConf();
+
+    const preview = texte
+      .replace(/{user}/g,   `<@${message.author.id}>`)
+      .replace(/{server}/g, message.guild.name)
+      .replace(/{count}/g,  message.guild.memberCount);
+
+    await message.reply({ embeds: [new EmbedBuilder()
+      .setColor('#00FF66')
+      .setTitle('🔔 Message de bienvenue configuré ✅')
+      .addFields(
+        { name: '📢 Salon',    value: `${channel}`,            inline: true },
+        { name: '👤 Aperçu', value: preview.slice(0, 500),     inline: false },
+      )
+      .setFooter({ text: 'Ce message sera envoyé automatiquement à chaque nouveau membre.' })
+      .setTimestamp()] });
+  },
 
   // ── CLEAR ────────────────────────────────────────────────────
   '!clear': async (message, args) => {
@@ -2657,6 +2968,26 @@ client.on('messageCreate', async (message) => {
     try { await message.react('❤️'); } catch (err) { console.warn('[LIKE AUTO] Impossible de réagir :', err.message); }
   }
 
+  // ── ANTI-BADWORDS ────────────────────────────────────────────
+  if (!isAdmin(message.author.id) && badwordsData.words.length > 0) {
+    const content = message.content.toLowerCase();
+    const found = badwordsData.words.find(w => content.includes(w.toLowerCase()));
+    if (found) {
+      await message.delete().catch(() => {});
+      if (!warnsData[message.author.id]) warnsData[message.author.id] = [];
+      warnsData[message.author.id].push({ reason: 'Mot interdit détecté (auto)', by: client.user.id, at: new Date().toISOString() });
+      saveWarns();
+      const bwMsg = await message.channel.send({
+        embeds: [embed('#FF4444').setTitle('⛔ Message supprimé — Mot interdit')
+          .setDescription(`<@${message.author.id}>, ton message contient un mot interdit et a été supprimé. Un warn automatique a été ajouté.`)
+          .addFields({ name: 'Warns', value: `${warnsData[message.author.id].length}/3`, inline: true })
+          .setFooter({ text: 'Anti-BadWords automatique' })]
+      }).catch(() => null);
+      if (bwMsg) setTimeout(() => bwMsg.delete().catch(() => {}), 8000);
+      return;
+    }
+  }
+
   if (!message.content.startsWith(CONFIG.PREFIX)) return;
 
   const [rawCmd, ...args] = message.content.trim().split(/\s+/);
@@ -2859,6 +3190,27 @@ client.on('guildMemberAdd', async (member) => {
             .setTimestamp()],
         }).catch(() => {});
       }
+    }
+    return; // Ne pas envoyer le message de bienvenue à un blacklisté
+  }
+
+  // ── MESSAGE DE BIENVENUE AUTOMATIQUE ─────────────────────────
+  if (welcomeConfig.channelId && welcomeConfig.message) {
+    const welcomeCh = member.guild.channels.cache.get(welcomeConfig.channelId);
+    if (welcomeCh) {
+      const msg = welcomeConfig.message
+        .replace(/{user}/g,   `<@${member.id}>`)
+        .replace(/{server}/g, member.guild.name)
+        .replace(/{count}/g,  member.guild.memberCount);
+      await welcomeCh.send({
+        embeds: [new EmbedBuilder()
+          .setColor('#FFD700')
+          .setTitle('⚡ Nouveau membre !')
+          .setDescription(msg)
+          .setThumbnail(member.user.displayAvatarURL({ size: 256 }))
+          .setTimestamp()
+          .setFooter({ text: `Membre #${member.guild.memberCount} · ${member.guild.name}` })]
+      }).catch(() => {});
     }
   }
 });
